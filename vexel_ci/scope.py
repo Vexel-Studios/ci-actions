@@ -58,10 +58,11 @@ class ScopeSettings:
     integration_branch: str = "develop"
     # Directories that hold one workspace package each (`apps/web`); a glob of one level per `*`.
     package_globs: tuple[str, ...] = ("apps/*", "packages/*")
-    # Documentation directories: everything in them builds and tests nothing.
+    # Documentation directories: everything in them builds and tests nothing, except what
+    # code_markdown_globs names.
     docs_globs: tuple[str, ...] = ("docs/*", ".agents/*")
-    # Other Markdown is documentation too, except these, which builds or tests read (for example
-    # */content/*.md).
+    # Other Markdown is documentation too. These, which builds or tests read (for example
+    # */content/*.md), are code wherever they are, documentation directories included.
     code_markdown_globs: tuple[str, ...] = ()
     lint_config_globs: tuple[str, ...] = ("eslint.config.*", "oxlint.config.*", "oxfmt.config.*", "lint/*")
     dependency_globs: tuple[str, ...] = ("bun.lock", "package.json", "*/package.json", "bunfig.toml", "patches/*")
@@ -154,10 +155,12 @@ def classify(files: list[str], settings: ScopeSettings) -> Changes:
     changes = Changes(flags={name: False for name, _ in settings.flags})
     inside = settings.package_globs + (".github/*", "bun.lock") + settings.lint_config_globs
     for path in files:
-        if matches(path, settings.docs_globs):
-            continue
-        if path.endswith(".md") and not matches(path, settings.code_markdown_globs):
-            continue
+        # Markdown a build or a test reads is code wherever it lives, a documentation directory
+        # included: otherwise a change to it alone would be documentation only, and a ci:merge would
+        # skip the very tests that read it.
+        if not matches(path, settings.code_markdown_globs):
+            if matches(path, settings.docs_globs) or path.endswith(".md"):
+                continue
         changes.code = True
         if matches(path, settings.lint_config_globs):
             changes.lint_all = True

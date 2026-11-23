@@ -54,8 +54,10 @@ class LightPullRequestTest(unittest.TestCase):
         (["packages/knowledge/src/a.ts"], False, True, False, False, [], {"landing": False, "knowledge": True}),
         (["apps/web/i18n/en.json", "apps/web/src/a.ts"], False, True, False, False, ["apps/web"], {"landing": False, "knowledge": False}),
         (["apps/landing/content/legal.md"], False, True, False, False, ["apps/landing"], {"landing": True, "knowledge": False}),
-        # A documentation directory wins over the code-Markdown exception, as in the shell script.
-        (["docs/content/x.md"], True, True, False, False, [], {"landing": False, "knowledge": False}),
+        # Markdown that builds or tests read is code even inside a documentation directory, so a
+        # ci:merge that changes only such a file still runs the tests that read it.
+        (["docs/content/x.md"], False, False, False, False, [], {"landing": False, "knowledge": False}),
+        (["docs/guide.md", ".agents/skills/x/notes.txt"], True, True, False, False, [], {"landing": False, "knowledge": False}),
         (["bun.lock"], False, True, False, True, [], {"landing": True, "knowledge": False}),
         (["packages/shared/package.json"], False, True, False, True, [], {"landing": True, "knowledge": False}),
         (["oxlint.config.ts"], False, True, True, False, [], {"landing": False, "knowledge": False}),
