@@ -44,7 +44,7 @@ A runner of the group (in the consumer's own organization) that carries every on
 the pool. `heavy` and `light` are the `runs-on` values of the two kinds of job, each with its route label first.
 `blacksmith_daily_minutes` is the daily overflow budget in 2 vCPU minutes; without it the repository never
 overflows. The App behind `client-id` and `private-key` needs organization self-hosted runners read and Actions
-read. An empty `pool`, a missing token or any error reading GitHub gives empty outputs, and the consumer's
+read. Give the route its own read-only App (organization self-hosted runners read, Actions read; repository settings `VEXEL_CI_ROUTE_CLIENT_ID` and `VEXEL_CI_ROUTE_PRIVATE_KEY`), not the App that merges: the router job runs in every run, and a job's runner receives every secret the job names. The template falls back to the merge App until the route App exists; conformance warns about that (`flow.route-key`, a warning that fails no strict run). An empty `pool`, a missing token or any error reading GitHub gives empty outputs, and the consumer's
 `CI_RUNS_ON` and `CI_LIGHT_RUNS_ON` variables decide.
 
 A pool may also reserve small runners for short jobs (a closing job, a quick check): `"small": ["pool-small",

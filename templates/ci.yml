@@ -117,8 +117,11 @@ jobs:
         uses: Vexel-Studios/ci-actions/route@v1
         with:
           pool: ${{ vars.VEXEL_CI_POOL }}
-          client-id: ${{ vars.VEXEL_CI_BOT_CLIENT_ID }}
-          private-key: ${{ secrets.VEXEL_CI_BOT_PRIVATE_KEY }}
+          # The read-only route App: this job runs in every run, so it must not hold the merge App's
+          # key. Until the repository has its route App the merge App stands in (conformance warns,
+          # flow.route-key); drop the `||` fallback once VEXEL_CI_ROUTE_* exist.
+          client-id: ${{ vars.VEXEL_CI_ROUTE_CLIENT_ID || vars.VEXEL_CI_BOT_CLIENT_ID }}
+          private-key: ${{ secrets.VEXEL_CI_ROUTE_PRIVATE_KEY || secrets.VEXEL_CI_BOT_PRIVATE_KEY }}
           mode: ${{ vars.VEXEL_CI_ROUTE || 'auto' }}
 
       # Warns on every run; a pull request's full run that drifts from the declared standard fails here.

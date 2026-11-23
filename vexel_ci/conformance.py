@@ -66,9 +66,13 @@ RULES = {
     "runners.blacksmith-2vcpu": "Blacksmith only at 2 vCPU",
     "runners.no-fixed-blacksmith": "No job is fixed to Blacksmith",
     "cost.router-only": "Only the router job (and the label reset) runs on CI_ROUTER_RUNS_ON",
+    "flow.route-key": "The router job uses the repository's read-only route App, not the merge App's key",
     "flow.merge-key-scope": "The App private key is named only by the router job and a job that exists only in merge runs",
     "cost.closing-job": "Merge and blocked run in the closing job, or in a job that exists only in merge runs",
 }
+# Rules reported as warnings: they show in the report and as annotations but fail no strict run, so a
+# repository can move at its own pace (flow.route-key: until each repository has its route App).
+WARNING_RULES = frozenset({"flow.route-key"})
 TYPESCRIPT_ONLY = {
     "toolchain.bun", "toolchain.vite-plus", "toolchain.code-style", "toolchain.turbo", "toolchain.task-runner",
     "toolchain.vite-config",
@@ -86,6 +90,10 @@ class Finding:
     message: str
     deviation: str = ""  # the recorded reason, when the manifest records this rule as a deviation
     triggered: bool = True  # False: a recorded deviation whose rule found nothing (it may be stale)
+
+    @property
+    def warning(self) -> bool:
+        return self.rule in WARNING_RULES and not self.deviation
 
 
 class Files:
@@ -321,6 +329,13 @@ def check_workflows(
     # A job's runner receives every secret the job references, whatever a step's `if:` says, so the
     # App's write key must not appear in a job that runs in every run (beyond the router, which the
     # route needs it for).
+    # The router holds its key in every run, on a third-party runner: a read-only route App's key, not
+    # the merge App's, which can write contents and merge.
+    if router_job is not None:
+        keys = set(re.findall(r"\bsecrets\.(\w*PRIVATE_KEY)\b", router_job.body)) - {"VEXEL_CI_ROUTE_PRIVATE_KEY"}
+        if keys:
+            findings.append(Finding("flow.route-key", f"The router job names {', '.join(sorted(keys))}; give the route the read-only route App (VEXEL_CI_ROUTE_CLIENT_ID, VEXEL_CI_ROUTE_PRIVATE_KEY) and drop the fallback"))
+
     for job in jobs:
         if job.name == router or not re.search(r"\bsecrets\.\w*PRIVATE_KEY\b", job.body):
             continue
@@ -478,7 +493,8 @@ def remote_checks(api: GitHubApi, repository: str) -> Callable[[list[Finding]], 
 
 
 def report(name: str, version: str, findings: list[Finding]) -> str:
-    violations = [f for f in findings if not f.deviation]
+    violations = [f for f in findings if not f.deviation and not f.warning]
+    warnings = [f for f in findings if f.warning]
     deviations = [f for f in findings if f.deviation and f.triggered]
     untriggered = [f for f in findings if f.deviation and not f.triggered]
     behind = f" (latest is {LATEST})" if version != LATEST else ""
@@ -487,11 +503,13 @@ def report(name: str, version: str, findings: list[Finding]) -> str:
         lines.append("Conforms: no finding.")
     else:
         lines += [
-            f"{len(violations)} violation(s), {len(deviations)} recorded deviation(s), {len(untriggered)} recorded but not triggered.",
+            f"{len(violations)} violation(s), {len(warnings)} warning(s), {len(deviations)} recorded deviation(s), {len(untriggered)} recorded but not triggered.",
             "", "| Rule | Finding | Status |", "| --- | --- | --- |",
         ]
-        for finding in violations + deviations + untriggered:
-            if not finding.deviation:
+        for finding in violations + warnings + deviations + untriggered:
+            if finding.warning:
+                status = "warning (fails no run)"
+            elif not finding.deviation:
                 status = "violation"
             elif finding.triggered:
                 status = f"deviation: {finding.deviation}"
@@ -532,7 +550,7 @@ def main(argv: list[str] | None = None) -> int:
         print(text)
         for finding in findings:
             if not finding.deviation:
-                violated = True
+                violated = violated or not finding.warning
                 print(f"::warning title=Vexel CI standard ({finding.rule})::{finding.message}")
         summary = os.environ.get("GITHUB_STEP_SUMMARY")
         if summary:
