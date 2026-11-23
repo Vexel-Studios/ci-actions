@@ -47,6 +47,7 @@ RULES = {
     "toolchain.code-style": "@vexel-studios/code-style at the standard's version",
     "toolchain.turbo": "Turbo at the standard's version, with a turbo.json",
     "toolchain.task-runner": "Turbo runs the tasks: no `vp run` in root scripts or workflows",
+    "toolchain.vite-config": "`vp lint` and `vp fmt` get their rules from the root vite.config's lint and fmt sections",
     "toolchain.node": "Node at the standard's major version where a workflow names one",
     "flow.route": "The router job calls the route action",
     "flow.scope": "The router job calls the scope action",
@@ -67,6 +68,7 @@ RULES = {
 }
 TYPESCRIPT_ONLY = {
     "toolchain.bun", "toolchain.vite-plus", "toolchain.code-style", "toolchain.turbo", "toolchain.task-runner",
+    "toolchain.vite-config",
     "flow.scope", "flow.router-permissions", "flow.setup", "flow.turbo-cache", "flow.cache-recheck", "flow.light-tests",
 }
 # A Blacksmith runner label anywhere in a text; the number is its vCPUs.
@@ -239,6 +241,15 @@ def check_toolchain(files: Files, toolchain: Any, workflows: dict[str, str], fin
     for path, text in workflows.items():
         if re.search(r"\bvp run\b", text):
             findings.append(Finding("toolchain.task-runner", f"{path} uses `vp run`"))
+    # `vp lint` and `vp fmt` ignore oxlint.config.ts and oxfmt.config.ts and read only the root
+    # vite.config's `lint` and `fmt` sections; without them `vp fmt` silently uses its defaults.
+    commands = " ".join(str(command) for command in (package.get("scripts") or {}).values()) + " " + " ".join(workflows.values())
+    used = [tool for tool in ("lint", "fmt") if re.search(rf"\bvp {tool}\b", commands)]
+    if used:
+        config = next((text for text in (files.read(f"vite.config.{ext}") for ext in ("ts", "mts", "js", "mjs")) if text is not None), None)
+        for tool in used:
+            if config is None or not re.search(rf"\b{tool}\s*:", config):
+                findings.append(Finding("toolchain.vite-config", f"`vp {tool}` is used but the root vite.config has no `{tool}` section"))
 
 
 def check_workflows(

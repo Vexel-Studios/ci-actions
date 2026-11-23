@@ -56,6 +56,14 @@ class ConformanceTest(unittest.TestCase):
     def test_the_template_conforms(self):
         self.assertEqual(self.findings(), [])
 
+    def test_vp_lint_and_fmt_need_their_sections_in_vite_config(self):
+        self.write("package.json", json.dumps(package(scripts={"lint": "turbo run lint", "format:check": "vp fmt --check"})))
+        self.assertEqual(self.rules(), {"toolchain.vite-config"})
+        self.write("vite.config.ts", "export default defineConfig({ lint: { extends: [oxlint] } })\n")
+        self.assertEqual(self.rules(), {"toolchain.vite-config"})
+        self.write("vite.config.ts", "export default defineConfig({\n  lint: lintConfig,\n  fmt: fmtConfig,\n})\n")
+        self.assertEqual(self.rules(), set())
+
     def test_a_corepack_hash_and_a_node_expression_still_conform(self):
         self.write("package.json", json.dumps(package(packageManager=f"bun@{TOOLS.bun}+sha512.abc")))
         self.edit_ci("    timeout-minutes: 15\n    env:", "    timeout-minutes: 15\n    # node-version: 22\n    env:")
