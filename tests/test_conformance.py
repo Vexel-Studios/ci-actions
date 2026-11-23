@@ -5,6 +5,7 @@ import unittest
 from pathlib import Path
 
 from vexel_ci.conformance import LocalFiles, check_repository, report
+from vexel_ci.conformance import main as conformance_main
 from vexel_ci.standard import LATEST, STANDARDS
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -48,13 +49,23 @@ class ConformanceTest(unittest.TestCase):
         path.write_text(text.replace(old, new, 1))
 
     def findings(self):
-        return check_repository(LocalFiles(self.root))[1]
+        """Everything but the template's own route-App fallback warning, which test_route_key pins."""
+        return [f for f in check_repository(LocalFiles(self.root))[1] if f.rule != "flow.route-key"]
 
     def rules(self):
-        return {finding.rule for finding in self.findings() if not finding.deviation}
+        return {finding.rule for finding in self.findings() if not finding.deviation and not finding.warning}
 
     def test_the_template_conforms(self):
         self.assertEqual(self.findings(), [])
+
+    def test_route_key_warns_about_the_merge_key_in_the_router_and_fails_no_strict_run(self):
+        warned = [f for f in check_repository(LocalFiles(self.root))[1] if f.rule == "flow.route-key"]
+        self.assertEqual([(f.warning, "VEXEL_CI_BOT_PRIVATE_KEY" in f.message) for f in warned], [(True, True)])
+        self.assertIn("warning (fails no run)", report("example-org/app", "1", warned))
+        self.assertEqual(conformance_main(["--root", str(self.root), "--strict"]), 0)
+        # Once the route App exists and the fallback is gone, nothing is left to warn about.
+        self.edit_ci(" || secrets.VEXEL_CI_BOT_PRIVATE_KEY }}", " }}")
+        self.assertEqual([f for f in check_repository(LocalFiles(self.root))[1] if f.rule == "flow.route-key"], [])
 
     def test_vp_lint_and_fmt_need_their_sections_in_vite_config(self):
         self.write("package.json", json.dumps(package(scripts={"lint": "turbo run lint", "format:check": "vp fmt --check"})))
