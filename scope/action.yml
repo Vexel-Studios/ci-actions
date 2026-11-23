@@ -1,0 +1,107 @@
+name: Vexel CI scope
+description: >-
+  Decide what this run covers, without a dependency install (vexel_ci/scope.py, README.md): full, light or verified, and what the change touches. Run it in the router job after
+  a checkout of the run's commit (a sparse one is enough; it reads the source tree's hash). It never
+  fails on an API error: a change it cannot list checks every package. An empty glob input keeps
+  the default named in its description (ScopeSettings in vexel_ci/scope.py).
+
+inputs:
+  github-token:
+    description: >-
+      The workflow's GITHUB_TOKEN; the job needs `actions: read` (the verified check) and `contents: read`.
+    required: true
+  integration-branch:
+    description: >-
+      The branch pull requests merge into; its pushes run light, or nothing when verified. Pushes to any other branch run full. Empty: develop.
+    required: false
+    default: ''
+  package-globs:
+    description: >-
+      Whitespace-separated directories that hold one workspace package each. Empty: apps/* packages/*.
+    required: false
+    default: ''
+  docs-globs:
+    description: >-
+      Whitespace-separated documentation directories; other Markdown is documentation too unless code-markdown-globs names it. Empty: docs/* .agents/*.
+    required: false
+    default: ''
+  code-markdown-globs:
+    description: Whitespace-separated Markdown that builds or tests read, so it counts as code.
+    required: false
+    default: ''
+  lint-config-globs:
+    description: >-
+      Whitespace-separated lint and format configuration, which every package's lint reads. Empty: eslint.config.* oxlint.config.* oxfmt.config.* lint/*.
+    required: false
+    default: ''
+  dependency-globs:
+    description: >-
+      Whitespace-separated files that change what is installed. Empty: bun.lock package.json */package.json bunfig.toml patches/*.
+    required: false
+    default: ''
+  flags:
+    description: >-
+      One flag per line, `name: glob glob ...`; the `flags` output says for each whether the change
+      touches one of its paths (true for every flag when the files are unknown, on full pushes and
+      manual runs).
+    required: false
+    default: ''
+
+outputs:
+  mode:
+    description: full, light or verified.
+    value: ${{ steps.scope.outputs.mode }}
+  merge-request:
+    description: "'true' for the full run that the ci:merge label asked for."
+    value: ${{ steps.scope.outputs.merge_request }}
+  reason:
+    description: Why, in words.
+    value: ${{ steps.scope.outputs.reason }}
+  code:
+    description: "'false' when the change is documentation only."
+    value: ${{ steps.scope.outputs.code }}
+  docs-only:
+    description: "'true' when the change is documentation only and the run is not verified."
+    value: ${{ steps.scope.outputs.docs_only }}
+  affected-only:
+    description: "'false' when the change touches files outside the packages or a workflow: check every package."
+    value: ${{ steps.scope.outputs.affected_only }}
+  lint-all:
+    description: "'true' when the change touches the lint or format configuration."
+    value: ${{ steps.scope.outputs.lint_all }}
+  dependencies:
+    description: "'true' when the change touches what is installed."
+    value: ${{ steps.scope.outputs.dependencies }}
+  test-in-full:
+    description: Space-separated package directories whose tests run in full in a light run.
+    value: ${{ steps.scope.outputs.test_in_full }}
+  flags:
+    description: JSON object of the configured flags.
+    value: ${{ steps.scope.outputs.flags }}
+  tree:
+    description: The checked-out source tree's hash.
+    value: ${{ steps.scope.outputs.tree }}
+
+runs:
+  using: composite
+  steps:
+    - name: Decide what this run covers
+      id: scope
+      shell: bash
+      env:
+        GH_TOKEN: ${{ inputs.github-token }}
+        EVENT_NAME: ${{ github.event_name }}
+        EVENT_ACTION: ${{ github.event.action }}
+        EVENT_LABEL: ${{ github.event.label.name }}
+        PR_NUMBER: ${{ github.event.pull_request.number }}
+        PUSH_BEFORE: ${{ github.event.before }}
+        PUSH_AFTER: ${{ github.event.after }}
+        SCOPE_INTEGRATION_BRANCH: ${{ inputs.integration-branch }}
+        SCOPE_PACKAGE_GLOBS: ${{ inputs.package-globs }}
+        SCOPE_DOCS_GLOBS: ${{ inputs.docs-globs }}
+        SCOPE_CODE_MARKDOWN_GLOBS: ${{ inputs.code-markdown-globs }}
+        SCOPE_LINT_CONFIG_GLOBS: ${{ inputs.lint-config-globs }}
+        SCOPE_DEPENDENCY_GLOBS: ${{ inputs.dependency-globs }}
+        SCOPE_FLAGS: ${{ inputs.flags }}
+        VEXEL_CI_ROOT: ${{ github.action_path }}/..
+      run: python3 -I "$VEXEL_CI_ROOT/run.py" vexel_ci.scope

@@ -1,0 +1,7 @@
+{
+  "standard": "1",
+  "kind": "typescript",
+  "ci_workflow": ".github/workflows/ci.yml",
+  "router_job": "preflight",
+  "deviations": []
+}

@@ -1,0 +1,97 @@
+name: Vexel CI merge request
+description: >-
+  The ci:merge label flow (vexel_ci/merge_pr.py). merge: the full run passed, so merge the
+  tested head with its SHA pinned; if this step fails before the merge call (no App token), it
+  withdraws the label with github-token. blocked: the full run failed, so remove the request
+  labels and say why (with merge-sha and base-branch, after a stale merge commit, say to re-run on
+  the current base instead). reset: a new commit arrived, so remove the request labels.
+  check-base: the stale merge-ref guard; fail unless the tested merge commit (merge-sha) has the
+  base branch's tip as its first parent (README.md).
+
+inputs:
+  action:
+    description: merge, blocked, reset or check-base.
+    required: true
+  client-id:
+    description: The repository's Vexel CI App client ID. Required for merge, whose push must start the base branch's workflows.
+    required: false
+    default: ''
+  private-key:
+    description: The repository's Vexel CI App private key. Required for merge.
+    required: false
+    default: ''
+  github-token:
+    description: The workflow's GITHUB_TOKEN with pull-requests write, for blocked, reset, and withdrawing a failed merge.
+    required: false
+    default: ''
+  pr-number:
+    description: The pull request number.
+    required: true
+  sha:
+    description: The head SHA the run tested.
+    required: true
+  labels:
+    description: The event's label names as JSON (reset).
+    required: false
+    default: '[]'
+  merge-method:
+    description: merge, squash or rebase.
+    required: false
+    default: merge
+  merge-sha:
+    description: >-
+      The merge commit the run tested (GITHUB_SHA), for check-base; for blocked only when the run
+      stopped on a stale base, so it re-checks and says so.
+    required: false
+    default: ''
+  base-branch:
+    description: The pull request's base branch (github.base_ref), with merge-sha.
+    required: false
+    default: ''
+
+runs:
+  using: composite
+  steps:
+    # contents and workflows write: a merge that changes .github/workflows needs both.
+    - name: Mint a Vexel CI App token for the merge
+      id: token
+      if: inputs.action == 'merge'
+      uses: actions/create-github-app-token@64ab729a6294000f5aa4a4bc0b73d1f32bc45510 # v3.3.0
+      with:
+        client-id: ${{ inputs.client-id }}
+        private-key: ${{ inputs.private-key }}
+        repositories: ${{ github.event.repository.name }}
+        permission-contents: write
+        permission-pull-requests: write
+        permission-workflows: write
+
+    - name: Run the merge request step
+      shell: bash
+      env:
+        GH_TOKEN: ${{ inputs.action == 'merge' && steps.token.outputs.token || inputs.github-token }}
+        ACTION: ${{ inputs.action }}
+        PR_NUMBER: ${{ inputs.pr-number }}
+        SHA: ${{ inputs.sha }}
+        LABELS: ${{ inputs.labels }}
+        METHOD: ${{ inputs.merge-method }}
+        MERGE_SHA: ${{ inputs.merge-sha }}
+        BASE_BRANCH: ${{ inputs.base-branch }}
+        RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        VEXEL_CI_ROOT: ${{ github.action_path }}/..
+      run: |
+        python3 -I "$VEXEL_CI_ROOT/run.py" vexel_ci.merge_pr "$ACTION" --repository "$GITHUB_REPOSITORY" --pr "$PR_NUMBER" \
+          --sha "$SHA" --run-url "$RUN_URL" --method "$METHOD" --labels "$LABELS" \
+          --merge-sha "$MERGE_SHA" --base-branch "$BASE_BRANCH"
+
+    # The merge step failed before GitHub saw a merge call (token mint, network): withdraw the
+    # request so it does not wait silently. merge_pr.py handles failures of the merge call itself.
+    - name: Withdraw the request after a failed merge step
+      if: failure() && inputs.action == 'merge' && inputs.github-token != ''
+      shell: bash
+      env:
+        GH_TOKEN: ${{ inputs.github-token }}
+        PR_NUMBER: ${{ inputs.pr-number }}
+        SHA: ${{ inputs.sha }}
+        RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        VEXEL_CI_ROOT: ${{ github.action_path }}/..
+      run: python3 -I "$VEXEL_CI_ROOT/run.py" vexel_ci.merge_pr abort --repository "$GITHUB_REPOSITORY" --pr "$PR_NUMBER" --sha "$SHA" --run-url "$RUN_URL"

@@ -1,0 +1,80 @@
+name: Vexel CI route
+description: >-
+  Decide where this run's jobs go: the consumer's self-hosted pool for heavy and light jobs, with
+  Blacksmith's 2 vCPU runner as overflow for light jobs when the pool is offline or its backlog is
+  too long, up to a daily Blacksmith budget (vexel_ci/route.py). It never fails the run: without a
+  pool, the App credentials or GitHub its outputs are empty, so the consumer's runner variables
+  decide.
+
+inputs:
+  pool:
+    description: >-
+      The pool as JSON: {"group_id": <runner group ID>, "runner_labels": [labels every pool runner
+      carries], "heavy": [heavy runs-on, route label first], "light": [light runs-on, route label
+      first], "blacksmith_daily_minutes": <2 vCPU minutes a day>}. Usually a repository variable;
+      empty means no pool, so the runner variables decide.
+    required: false
+    default: ''
+  client-id:
+    description: >-
+      The repository's GitHub App client ID; the App needs organization self-hosted runners read
+      and Actions read.
+    required: false
+    default: ''
+  private-key:
+    description: The repository's GitHub App private key.
+    required: false
+    default: ''
+  mode:
+    description: auto, local (never overflow) or overflow (always Blacksmith). Repository variable VEXEL_CI_ROUTE.
+    required: false
+    default: auto
+  overflow-after-minutes:
+    description: Overflow when a new job would wait longer than this for a pool runner.
+    required: false
+    default: ''
+  blacksmith-daily-minutes:
+    description: >-
+      Blacksmith 2 vCPU minutes this repository may use per UTC day before overflow stops; empty
+      uses the pool's blacksmith_daily_minutes (none: never overflow).
+    required: false
+    default: ''
+
+outputs:
+  heavy-runs-on:
+    description: JSON runs-on value for heavy jobs; empty when the runner variables decide.
+    value: ${{ steps.route.outputs.heavy_runs_on }}
+  light-runs-on:
+    description: JSON runs-on value for light jobs; empty when the runner variables decide.
+    value: ${{ steps.route.outputs.light_runs_on }}
+  reason:
+    description: Why, in words.
+    value: ${{ steps.route.outputs.reason }}
+
+runs:
+  using: composite
+  steps:
+    # Read-only: the runner group and this repository's queued jobs, in the consumer's own organization.
+    - name: Mint a read-only App token
+      id: token
+      if: inputs.client-id != '' && inputs.private-key != '' && inputs.mode == 'auto' && inputs.pool != ''
+      continue-on-error: true
+      uses: actions/create-github-app-token@64ab729a6294000f5aa4a4bc0b73d1f32bc45510 # v3.3.0
+      with:
+        client-id: ${{ inputs.client-id }}
+        private-key: ${{ inputs.private-key }}
+        owner: ${{ github.repository_owner }}
+        permission-actions: read
+        permission-organization-self-hosted-runners: read
+
+    - name: Choose runners
+      id: route
+      shell: bash
+      env:
+        GH_TOKEN: ${{ steps.token.outputs.token }}
+        VEXEL_CI_POOL: ${{ inputs.pool }}
+        ROUTE_MODE: ${{ inputs.mode }}
+        OVERFLOW_AFTER_MINUTES: ${{ inputs.overflow-after-minutes }}
+        BLACKSMITH_DAILY_MINUTES: ${{ inputs.blacksmith-daily-minutes }}
+        VEXEL_CI_ROOT: ${{ github.action_path }}/..
+      run: python3 -I "$VEXEL_CI_ROOT/run.py" vexel_ci.route

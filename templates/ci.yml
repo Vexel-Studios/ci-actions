@@ -1,0 +1,332 @@
+# Vexel CI standard v1: the CI workflow of a TypeScript consumer.
+#
+# Copy it to .github/workflows/ci.yml with .github/vexel-ci.json beside it, then add the
+# repository's own checks to `light` and `quality` and its own full-run jobs (builds, e2e) to the
+# `close` job's needs. tests/test_conformance.py keeps this file conformant. A repository whose
+# integration branch is not develop sets it on the scope and turbo-cache actions and in `concurrency`.
+name: CI
+
+# A draft's run skips every job, so its name says why.
+run-name: "${{ github.event_name == 'pull_request' && github.event.pull_request.draft && github.event.action != 'labeled' && format('Draft, no CI until it is ready for review: {0}', github.event.pull_request.title) || '' }}"
+
+on:
+  # opened, synchronize, reopened, ready_for_review: light CI on a pull request that is ready for
+  # review (a draft runs nothing). labeled: `ci:merge` runs the full suite once on the current head
+  # and then merges it, `ci:full` runs it without merging. edited: a changed base runs again.
+  pull_request:
+    types: [opened, synchronize, reopened, ready_for_review, labeled, edited]
+  workflow_dispatch:
+  push:
+    branches: [main, develop, hotfix/**, release/**]
+
+permissions:
+  contents: read
+
+# One group per branch for pull request and manual runs; push runs have their own, one per commit
+# outside develop. Events that run nothing (another label, an edit that leaves the base, a
+# ready_for_review CI caused itself or that a request label already covers) get a group of their
+# own, so they cancel nothing.
+concurrency:
+  group: ci-${{ github.event_name == 'push' && 'push-' || '' }}${{ github.head_ref || github.ref_name }}${{ github.event_name == 'push' && github.ref_name != 'develop' && format('-{0}', github.sha) || '' }}${{ ((github.event.action == 'labeled' && github.event.label.name != 'ci:full' && github.event.label.name != 'ci:merge') || (github.event.action == 'edited' && !github.event.changes.base) || (github.event.action == 'ready_for_review' && (github.event.sender.type == 'Bot' || contains(github.event.pull_request.labels.*.name, 'ci:merge') || contains(github.event.pull_request.labels.*.name, 'ci:full')))) && format('-skip-{0}', github.run_id) || '' }}
+  cancel-in-progress: true
+
+jobs:
+  # A new head needs a new approval: a push removes `ci:merge` and `ci:full`, on a draft too. It
+  # runs only while such a label is on the pull request, so it is rarely billed.
+  withdraw_merge_request:
+    if: github.event.action == 'synchronize' && (contains(github.event.pull_request.labels.*.name, 'ci:merge') || contains(github.event.pull_request.labels.*.name, 'ci:full'))
+    runs-on: ${{ fromJSON(vars.CI_ROUTER_RUNS_ON || vars.CI_LIGHT_RUNS_ON || vars.CI_RUNS_ON || '"ubuntu-24.04"') }}
+    timeout-minutes: 3
+    permissions:
+      pull-requests: write
+    steps:
+      - name: Withdraw merge requests from the previous head
+        continue-on-error: true
+        timeout-minutes: 2
+        uses: Vexel-Studios/ci-actions/merge-request@v1
+        with:
+          action: reset
+          github-token: ${{ github.token }}
+          pr-number: ${{ github.event.pull_request.number }}
+          sha: ${{ github.event.pull_request.head.sha }}
+          labels: ${{ toJson(github.event.pull_request.labels.*.name) }}
+
+  # The router: the run's one Blacksmith job that is not overflow. It decides the scope, guards a
+  # merge run's base, picks the runners and checks conformance, all without an install.
+  preflight:
+    if: ${{ !((github.event.action == 'labeled' && github.event.label.name != 'ci:full' && github.event.label.name != 'ci:merge') || (github.event.action == 'edited' && !github.event.changes.base) || (github.event.action == 'ready_for_review' && (github.event.sender.type == 'Bot' || contains(github.event.pull_request.labels.*.name, 'ci:merge') || contains(github.event.pull_request.labels.*.name, 'ci:full'))) || (github.event.pull_request.draft && github.event.action != 'labeled')) }}
+    runs-on: ${{ fromJSON(vars.CI_ROUTER_RUNS_ON || vars.CI_LIGHT_RUNS_ON || vars.CI_RUNS_ON || '"ubuntu-24.04"') }}
+    timeout-minutes: 5
+    # pull-requests: read lets the scope list a pull request's files (403 without it, and every light
+    # run checks every package); actions: read finds the record that verifies a push.
+    permissions:
+      contents: read
+      actions: read
+      pull-requests: read
+    outputs:
+      mode: ${{ steps.scope.outputs.mode }}
+      reason: ${{ steps.scope.outputs.reason }}
+      docs_only: ${{ steps.scope.outputs.docs-only }}
+      affected_only: ${{ steps.scope.outputs.affected-only }}
+      lint_all: ${{ steps.scope.outputs.lint-all }}
+      dependencies: ${{ steps.scope.outputs.dependencies }}
+      test_in_full: ${{ steps.scope.outputs.test-in-full }}
+      merge_request: ${{ steps.scope.outputs.merge-request }}
+      tree: ${{ steps.scope.outputs.tree }}
+      code: ${{ steps.scope.outputs.code }}
+      flags: ${{ steps.scope.outputs.flags }}
+      stale_base: ${{ steps.current_base.outcome == 'failure' }}
+      heavy_runs_on: ${{ steps.route.outputs.heavy-runs-on }}
+      light_runs_on: ${{ steps.route.outputs.light-runs-on }}
+    steps:
+      # Cone mode always includes the root files (package.json, turbo.json) that conformance reads.
+      - name: Checkout .github
+        uses: actions/checkout@v7
+        with:
+          sparse-checkout: .github
+          persist-credentials: false
+
+      - name: Decide what this run covers
+        id: scope
+        uses: Vexel-Studios/ci-actions/scope@v1
+        with:
+          github-token: ${{ github.token }}
+
+      # A `ci:merge` run tests GitHub's cached merge commit, which can sit on an old base: stop
+      # before any heavy job queues unless its first parent is the base's live tip.
+      - name: Verify the tested merge is on the base tip
+        id: current_base
+        if: steps.scope.outputs.merge-request == 'true'
+        uses: Vexel-Studios/ci-actions/merge-request@v1
+        with:
+          action: check-base
+          github-token: ${{ github.token }}
+          pr-number: ${{ github.event.pull_request.number }}
+          sha: ${{ github.event.pull_request.head.sha }}
+          merge-sha: ${{ github.sha }}
+          base-branch: ${{ github.base_ref }}
+
+      # Never fails the run: without a pool, the App credentials or GitHub the runner variables
+      # decide. The pool (runner group, labels, Blacksmith share) is the repository's VEXEL_CI_POOL
+      # variable (README.md, "The route's pool").
+      - name: Choose the runners
+        id: route
+        continue-on-error: true
+        timeout-minutes: 2
+        uses: Vexel-Studios/ci-actions/route@v1
+        with:
+          pool: ${{ vars.VEXEL_CI_POOL }}
+          client-id: ${{ vars.VEXEL_CI_BOT_CLIENT_ID }}
+          private-key: ${{ secrets.VEXEL_CI_BOT_PRIVATE_KEY }}
+          mode: ${{ vars.VEXEL_CI_ROUTE || 'auto' }}
+
+      # Warns on every run; a pull request's full run that drifts from the declared standard fails here.
+      - name: Check the repository against the Vexel CI standard
+        uses: Vexel-Studios/ci-actions/conformance@v1
+        with:
+          strict: ${{ github.event_name == 'pull_request' && steps.scope.outputs.mode == 'full' }}
+
+  # A documentation-only change: lint what it touched.
+  docs:
+    needs: preflight
+    if: needs.preflight.outputs.docs_only == 'true'
+    runs-on: ${{ fromJSON(needs.preflight.outputs.light_runs_on || vars.CI_LIGHT_RUNS_ON || vars.CI_RUNS_ON || '"ubuntu-24.04"') }}
+    timeout-minutes: 15
+    env:
+      TURBO_SCM_BASE: ${{ github.event.pull_request.base.sha || github.event.before }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+      - uses: Vexel-Studios/ci-actions/setup@v1
+        with:
+          scan-dependencies: ${{ needs.preflight.outputs.dependencies }}
+      - id: turbo-cache
+        uses: Vexel-Studios/ci-actions/turbo-cache@v1
+        with:
+          api-url: ${{ vars.TURBO_API }}
+          token: ${{ secrets.TURBO_TOKEN }}
+          signature-key: ${{ secrets.TURBO_REMOTE_CACHE_SIGNATURE_KEY }}
+      - name: Lint the affected packages
+        run: bun x turbo run lint --affected
+      - name: Run one cached task again
+        if: steps.turbo-cache.outputs.reads-remote == 'true'
+        uses: Vexel-Studios/ci-actions/verify-cache-hit@v1
+
+  # Light: lint and types of the affected packages and their dependents, the changed packages'
+  # tests narrowed to the files whose imports reach the change. Every package when the change
+  # touches files outside them (affected_only false).
+  light:
+    needs: preflight
+    if: needs.preflight.outputs.mode == 'light' && needs.preflight.outputs.docs_only != 'true'
+    runs-on: ${{ fromJSON(needs.preflight.outputs.light_runs_on || vars.CI_LIGHT_RUNS_ON || vars.CI_RUNS_ON || '"ubuntu-24.04"') }}
+    timeout-minutes: 45
+    env:
+      TURBO_SCM_BASE: ${{ github.event.pull_request.base.sha || github.event.before }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+      - uses: Vexel-Studios/ci-actions/setup@v1
+        with:
+          scan-dependencies: ${{ needs.preflight.outputs.dependencies }}
+      - uses: Vexel-Studios/ci-actions/turbo-cache@v1
+        with:
+          api-url: ${{ vars.TURBO_API }}
+          token: ${{ secrets.TURBO_TOKEN }}
+          signature-key: ${{ secrets.TURBO_REMOTE_CACHE_SIGNATURE_KEY }}
+      - name: Lint the affected packages
+        env:
+          AFFECTED_ONLY: ${{ needs.preflight.outputs.affected_only }}
+          LINT_ALL: ${{ needs.preflight.outputs.lint_all }}
+        run: |
+          scope=()
+          if [ "$AFFECTED_ONLY" = true ] && [ "$LINT_ALL" != true ]; then scope=(--affected); fi
+          bun x turbo run lint "${scope[@]}"
+      - name: Check the formatting
+        if: ${{ !cancelled() }}
+        run: bun run format:check
+      - name: Typecheck the affected packages
+        if: ${{ !cancelled() }}
+        env:
+          AFFECTED_ONLY: ${{ needs.preflight.outputs.affected_only }}
+        run: |
+          scope=()
+          if [ "$AFFECTED_ONLY" = true ]; then scope=(--affected); fi
+          bun x turbo run typecheck "${scope[@]}"
+      # The packages the change touches (turbo's [base] filter, not their dependents), and within
+      # them only the test files whose imports reach a changed file (Vitest --changed). A
+      # dependency change tests them in full; a package with a changed non-module file (fixture,
+      # locale, migration) is tested in full on its own first.
+      - name: Test the changed packages
+        if: ${{ !cancelled() }}
+        env:
+          AFFECTED_ONLY: ${{ needs.preflight.outputs.affected_only }}
+          DEPENDENCIES: ${{ needs.preflight.outputs.dependencies }}
+          TEST_IN_FULL: ${{ needs.preflight.outputs.test_in_full }}
+        run: |
+          scope=()
+          narrow=()
+          full=()
+          if [ "$AFFECTED_ONLY" = true ]; then scope=("--filter=[$TURBO_SCM_BASE]"); fi
+          if [ "$AFFECTED_ONLY" = true ] && [ "$DEPENDENCIES" != true ]; then
+            narrow=(-- "--changed=$TURBO_SCM_BASE")
+            set -f  # split the list on spaces without expanding globs in it
+            for directory in $TEST_IN_FULL; do
+              [ -f "$directory/package.json" ] || continue
+              full+=("--filter=./$directory")
+              scope+=("--filter=!./$directory")
+            done
+            set +f
+          fi
+          status=0
+          if [ "${#full[@]}" -gt 0 ]; then
+            bun x turbo run test "${full[@]}" || status=$?
+          fi
+          bun x turbo run test "${scope[@]}" "${narrow[@]}" || status=$?
+          exit "$status"
+
+  # Full: every check once, with one cached test task re-checked here, off the tests' critical path.
+  quality:
+    needs: preflight
+    if: needs.preflight.outputs.mode == 'full' && needs.preflight.outputs.docs_only != 'true'
+    runs-on: ${{ fromJSON(needs.preflight.outputs.heavy_runs_on || vars.CI_RUNS_ON || '"ubuntu-24.04"') }}
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v7
+      - uses: Vexel-Studios/ci-actions/setup@v1
+        with:
+          scan-dependencies: ${{ needs.preflight.outputs.dependencies }}
+      - id: turbo-cache
+        uses: Vexel-Studios/ci-actions/turbo-cache@v1
+        with:
+          api-url: ${{ vars.TURBO_API }}
+          token: ${{ secrets.TURBO_TOKEN }}
+          signature-key: ${{ secrets.TURBO_REMOTE_CACHE_SIGNATURE_KEY }}
+      # Before this job's first turbo run, so the tests jobs' remote hits are what it lists.
+      - name: List the cached test tasks
+        if: steps.turbo-cache.outputs.reads-remote == 'true'
+        run: bun x turbo run test --dry=json > "$RUNNER_TEMP/test-dry-run.json"
+      - name: Lint
+        run: bun x turbo run lint
+      - name: Check the formatting
+        if: ${{ !cancelled() }}
+        run: bun run format:check
+      - name: Typecheck
+        if: ${{ !cancelled() }}
+        run: bun x turbo run typecheck
+      - name: Run one cached task again
+        if: steps.turbo-cache.outputs.reads-remote == 'true'
+        uses: Vexel-Studios/ci-actions/verify-cache-hit@v1
+      - name: Run one cached test task again
+        if: steps.turbo-cache.outputs.reads-remote == 'true'
+        uses: Vexel-Studios/ci-actions/verify-cache-hit@v1
+        with:
+          dry-run: ${{ runner.temp }}/test-dry-run.json
+
+  tests:
+    needs: preflight
+    if: needs.preflight.outputs.mode == 'full' && needs.preflight.outputs.docs_only != 'true'
+    runs-on: ${{ fromJSON(needs.preflight.outputs.heavy_runs_on || vars.CI_RUNS_ON || '"ubuntu-24.04"') }}
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v7
+      - uses: Vexel-Studios/ci-actions/setup@v1
+        with:
+          scan-dependencies: ${{ needs.preflight.outputs.dependencies }}
+      - uses: Vexel-Studios/ci-actions/turbo-cache@v1
+        with:
+          api-url: ${{ vars.TURBO_API }}
+          token: ${{ secrets.TURBO_TOKEN }}
+          signature-key: ${{ secrets.TURBO_REMOTE_CACHE_SIGNATURE_KEY }}
+      - name: Test
+        run: bun x turbo run test
+
+  # The run's one closing job, on the light route (the pool, or Blacksmith only as overflow): the
+  # summary and the verified-tree record, then the merge or the withdrawal, in one billed job.
+  close:
+    if: ${{ !cancelled() && !((github.event.action == 'labeled' && github.event.label.name != 'ci:full' && github.event.label.name != 'ci:merge') || (github.event.action == 'edited' && !github.event.changes.base) || (github.event.action == 'ready_for_review' && (github.event.sender.type == 'Bot' || contains(github.event.pull_request.labels.*.name, 'ci:merge') || contains(github.event.pull_request.labels.*.name, 'ci:full'))) || (github.event.pull_request.draft && github.event.action != 'labeled')) }}
+    needs: [preflight, docs, light, quality, tests]
+    runs-on: ${{ fromJSON(needs.preflight.outputs.light_runs_on || vars.CI_LIGHT_RUNS_ON || vars.CI_RUNS_ON || '"ubuntu-24.04"') }}
+    timeout-minutes: 10
+    permissions:
+      contents: read
+      pull-requests: write
+    steps:
+      - name: CI complete
+        id: complete
+        uses: Vexel-Studios/ci-actions/complete@v1
+        with:
+          needs: ${{ toJson(needs) }}
+          mode: ${{ needs.preflight.outputs.mode }}
+          reason: ${{ needs.preflight.outputs.reason }}
+          tree: ${{ needs.preflight.outputs.tree }}
+          stale-base: ${{ needs.preflight.outputs.stale_base }}
+
+      - name: Merge the tested head
+        if: steps.complete.outputs.passed == 'true' && needs.preflight.outputs.merge_request == 'true' && needs.preflight.outputs.mode == 'full'
+        uses: Vexel-Studios/ci-actions/merge-request@v1
+        with:
+          action: merge
+          client-id: ${{ vars.VEXEL_CI_BOT_CLIENT_ID }}
+          private-key: ${{ secrets.VEXEL_CI_BOT_PRIVATE_KEY }}
+          github-token: ${{ github.token }}
+          pr-number: ${{ github.event.pull_request.number }}
+          sha: ${{ github.event.pull_request.head.sha }}
+          merge-method: ${{ vars.CI_MERGE_METHOD || 'merge' }}
+
+      # After a stale base the step checks again and says to re-run on the current base.
+      - name: Withdraw the merge request
+        if: ${{ !cancelled() && steps.complete.outputs.passed != 'true' && github.event.action == 'labeled' && github.event.label.name == 'ci:merge' }}
+        uses: Vexel-Studios/ci-actions/merge-request@v1
+        with:
+          action: blocked
+          github-token: ${{ github.token }}
+          pr-number: ${{ github.event.pull_request.number }}
+          sha: ${{ github.event.pull_request.head.sha }}
+          merge-sha: ${{ needs.preflight.outputs.stale_base == 'true' && github.sha || '' }}
+          base-branch: ${{ needs.preflight.outputs.stale_base == 'true' && github.base_ref || '' }}
+
+      - name: Fail the run
+        if: ${{ !cancelled() && steps.complete.outputs.passed != 'true' }}
+        run: exit 1
