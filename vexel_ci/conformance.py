@@ -66,6 +66,7 @@ RULES = {
     "runners.blacksmith-2vcpu": "Blacksmith only at 2 vCPU",
     "runners.no-fixed-blacksmith": "No job is fixed to Blacksmith",
     "cost.router-only": "Only the router job (and the label reset) runs on CI_ROUTER_RUNS_ON",
+    "flow.merge-key-scope": "The App private key is named only by the router job and a job that exists only in merge runs",
     "cost.closing-job": "Blocked runs in the closing job; merge there or in a job that exists only in merge runs",
 }
 TYPESCRIPT_ONLY = {
@@ -315,6 +316,15 @@ def check_workflows(
             continue
         if merges and job not in closing:
             findings.append(Finding("cost.closing-job", f"Job `{job.name}` runs merge-request {' and '.join(merges)} on its own; fold it into the closing job"))
+
+    # A job's runner receives every secret the job references, whatever a step's `if:` says, so the
+    # App's write key must not appear in a job that runs in every run (beyond the router, which the
+    # route needs it for).
+    for job in jobs:
+        if job.name == router or not re.search(r"\bsecrets\.\w*PRIVATE_KEY\b", job.body):
+            continue
+        if not re.search(r"^    if:.*\bmerge_request\b", job.body, re.MULTILINE):
+            findings.append(Finding("flow.merge-key-scope", f"Job `{job.name}` names an App private key but runs outside merge runs; give the merge a job gated on merge_request"))
 
     for job in jobs:
         if "CI_ROUTER_RUNS_ON" in job.runs_on and job.name != router and not re.search(r"^\s+action: reset\s*$", job.body, re.MULTILINE):
