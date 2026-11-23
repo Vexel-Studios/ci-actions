@@ -104,6 +104,9 @@ def pool_from_json(text: str) -> Pool | None:
     small = small_runner_labels = None
     if "small" in value or "small_runner_labels" in value:
         small, small_runner_labels = label_list("small"), frozenset(label_list("small_runner_labels"))
+        # Otherwise every pool runner could count as small (its labels a subset of theirs).
+        if small[0] not in small_runner_labels:
+            raise ValueError("pool.small_runner_labels must include the small route label (small[0])")
     return Pool(
         value["group_id"], frozenset(label_list("runner_labels")), label_list("heavy"), label_list("light"), float(budget),
         small, small_runner_labels or frozenset(),

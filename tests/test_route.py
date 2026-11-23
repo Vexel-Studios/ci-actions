@@ -131,6 +131,8 @@ class ReadSnapshotTest(unittest.TestCase):
 SMALL_LABEL = "pool-small"
 SMALL_LOCAL = [SMALL_LABEL, ARCH]
 SMALL_POOL = Pool(GROUP_ID, POOL.runner_labels, HEAVY_LOCAL, LIGHT_LOCAL, 0, SMALL_LOCAL, frozenset({HOST, ARCH, SMALL_LABEL}))
+# A pool whose runners need only host and arch: a reserved runner matches it too, so the order counts.
+BROAD_POOL = Pool(GROUP_ID, frozenset({HOST, ARCH}), HEAVY_LOCAL, LIGHT_LOCAL, 0, SMALL_LOCAL, frozenset({HOST, ARCH, SMALL_LABEL}))
 SMALL_RUNNER = [{"name": n} for n in (HOST, ARCH, SMALL_LABEL)]
 
 
@@ -163,15 +165,26 @@ class SmallRouteTest(unittest.TestCase):
             runs={(APP, "queued"): [{"id": 10}]},
             jobs={10: [queued(SMALL_LOCAL), queued(HEAVY_LOCAL)]},
         )
-        snapshot, _ = read_snapshot(api, SMALL_POOL, org=ORG, repositories=(APP,))
+        snapshot, _ = read_snapshot(api, BROAD_POOL, org=ORG, repositories=(APP,))
         self.assertEqual((snapshot.pool.online, snapshot.pool.waiting), (1, 1))
         self.assertEqual((snapshot.small.online, snapshot.small.idle, snapshot.small.waiting), (1, 0, 1))
 
     def test_the_pool_input_takes_small_and_its_labels_together(self):
         fields = {**POOL_FIELDS, "small": SMALL_LOCAL, "small_runner_labels": [HOST, ARCH, SMALL_LABEL]}
         self.assertEqual(pool_from_json(json.dumps(fields)).small, SMALL_LOCAL)
-        with self.assertRaises(ValueError):
-            pool_from_json(json.dumps({**POOL_FIELDS, "small": SMALL_LOCAL}))
+        for bad in ({**POOL_FIELDS, "small": SMALL_LOCAL}, {**POOL_FIELDS, "small": SMALL_LOCAL, "small_runner_labels": [HOST, ARCH]}):
+            with self.subTest(bad=bad), self.assertRaises(ValueError):
+                pool_from_json(json.dumps(bad))
+
+    def test_small_jobs_never_get_blacksmith_beyond_the_budget(self):
+        # The reserved runner is busy and the pool backed up, so both would overflow; without a share
+        # the light jobs wait for the pool, and the small ones follow them there.
+        fields = {**POOL_FIELDS, "small": SMALL_LOCAL, "small_runner_labels": [HOST, ARCH, SMALL_LABEL]}
+        api = FakeApi([runner(1, POOL_RUNNER, busy=True), runner(2, SMALL_RUNNER, busy=True)],
+                      runs={(APP, "queued"): [{"id": 10}]}, jobs={10: [queued(HEAVY_LOCAL)] * 5 + [queued(SMALL_LOCAL)] * 3})
+        env = {"GH_TOKEN": "t", "GITHUB_REPOSITORY": APP, "VEXEL_CI_POOL": json.dumps(fields)}
+        route = route_from_env(env, api_factory=lambda token: api, now=NOW)
+        self.assertEqual((route.light, route.small), (LIGHT_LOCAL, LIGHT_LOCAL))
 
 
 class DecideTest(unittest.TestCase):
