@@ -90,8 +90,8 @@ class ConformanceTest(unittest.TestCase):
             ),
             # The closing job on the router's Blacksmith runner.
             "closing job on the router": (
-                "    needs: [preflight, docs, light, quality, tests]\n    runs-on: ${{ fromJSON(needs.preflight.outputs.light_runs_on",
-                "    needs: [preflight, docs, light, quality, tests]\n    runs-on: ${{ fromJSON(vars.CI_ROUTER_RUNS_ON || needs.preflight.outputs.light_runs_on",
+                "    runs-on: ${{ fromJSON(needs.preflight.outputs.small_runs_on",
+                "    runs-on: ${{ fromJSON(vars.CI_ROUTER_RUNS_ON || needs.preflight.outputs.small_runs_on",
                 {"cost.router-only"},
             ),
             "a GitHub-hosted job": (

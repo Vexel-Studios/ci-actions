@@ -11,6 +11,9 @@ then writes two `runs-on` values as JSON:
   forced `overflow` mode sends heavy jobs to Blacksmith.
 - light: the pool, or Blacksmith when no pool runner is online or its backlog would make a new
   job wait longer than the overflow limit.
+- small: for short jobs (a closing job, a quick check), the pool's reserved small runners when it
+  has them and they are free soon, so these jobs never queue behind heavy builds; otherwise the
+  light route.
 
 Overflow is capped per repository and UTC day (the pool's `blacksmith_daily_minutes`, or the
 action's input): once the repository's Blacksmith minutes reach its share, overflowing jobs wait
@@ -59,7 +62,9 @@ class Pool:
     `{"group_id": 123, "runner_labels": [...], "heavy": [...], "light": [...], "blacksmith_daily_minutes": 60}`:
     a runner of the group that carries every one of `runner_labels` is part of the pool; `heavy` and
     `light` are the runs-on values of the two kinds of job, each with its route label first; the
-    budget is in 2 vCPU minutes per UTC day (0 or absent: never overflow).
+    budget is in 2 vCPU minutes per UTC day (0 or absent: never overflow). Optionally `small` (the
+    runs-on of the reserved small runners, route label first) with `small_runner_labels` (the
+    labels each of them carries).
     """
 
     group_id: int
@@ -67,10 +72,15 @@ class Pool:
     heavy: list[str]
     light: list[str]
     blacksmith_daily_minutes: float = 0.0
+    small: list[str] | None = None
+    small_runner_labels: frozenset[str] = frozenset()
 
     def waits_for_it(self, labels: set[str]) -> bool:
         """A heavy job, or a light job that names nothing outside the light route, runs only here."""
         return self.heavy[0] in labels or (self.light[0] in labels and labels <= set(self.light))
+
+    def waits_for_small(self, labels: set[str]) -> bool:
+        return self.small is not None and self.small[0] in labels
 
 
 def pool_from_json(text: str) -> Pool | None:
@@ -91,7 +101,13 @@ def pool_from_json(text: str) -> Pool | None:
     budget = value.get("blacksmith_daily_minutes", 0)
     if not isinstance(budget, (int, float)) or isinstance(budget, bool) or not math.isfinite(budget) or budget < 0:
         raise ValueError("pool.blacksmith_daily_minutes must be a number of minutes")
-    return Pool(value["group_id"], frozenset(label_list("runner_labels")), label_list("heavy"), label_list("light"), float(budget))
+    small = small_runner_labels = None
+    if "small" in value or "small_runner_labels" in value:
+        small, small_runner_labels = label_list("small"), frozenset(label_list("small_runner_labels"))
+    return Pool(
+        value["group_id"], frozenset(label_list("runner_labels")), label_list("heavy"), label_list("light"), float(budget),
+        small, small_runner_labels or frozenset(),
+    )
 
 
 @dataclass(frozen=True)
@@ -112,6 +128,10 @@ class RouteSettings:
     # no longer overflow).
     light_reserve_minutes: float = 30.0
     active_run_reserve_minutes: float = 30.0
+    # A small job (a closing job, a quick check) takes about this long on a small runner, and waits
+    # at most this long for one before it takes the light route instead.
+    small_job_minutes: float = 2.0
+    small_wait_limit_minutes: float = 5.0
 
 
 @dataclass
@@ -135,6 +155,7 @@ class PoolState:
 @dataclass
 class Snapshot:
     pool: PoolState = field(default_factory=PoolState)
+    small: PoolState = field(default_factory=PoolState)
 
 
 @dataclass(frozen=True)
@@ -144,6 +165,7 @@ class Route:
     heavy: Any
     light: Any
     reason: str
+    small: Any = None
 
 
 def label_set(item: dict[str, Any]) -> set[str]:
@@ -164,13 +186,18 @@ def read_snapshot(
     snapshot = Snapshot()
     runners = api.paginated(f"/orgs/{org}/actions/runner-groups/{pool.group_id}/runners", "runners")
     for runner in runners:
-        if not pool.runner_labels <= label_set(runner):
+        labels = label_set(runner)
+        if pool.small is not None and pool.small_runner_labels <= labels:
+            state = snapshot.small
+        elif pool.runner_labels <= labels:
+            state = snapshot.pool
+        else:
             # Another host, or quarantined: it takes no routed job.
             continue
         if runner.get("status") == "online":
-            snapshot.pool.online += 1
+            state.online += 1
             if runner.get("busy") is False:
-                snapshot.pool.idle += 1
+                state.idle += 1
 
     notes: list[str] = []
     for repository in repositories:
@@ -180,6 +207,7 @@ def read_snapshot(
             notes.append(f"{repository} queue unreadable ({error})")
             continue
         snapshot.pool.waiting += sum(1 for job in jobs if pool.waits_for_it(label_set(job)))
+        snapshot.small.waiting += sum(1 for job in jobs if pool.waits_for_small(label_set(job)))
     return snapshot, notes
 
 
@@ -206,7 +234,7 @@ def decide(snapshot: Snapshot, settings: RouteSettings) -> Route:
         return Route(None, None, "Routing off (VEXEL_CI_ROUTE=local): the runner variables decide")
     if settings.mode == "overflow":
         return Route(settings.heavy_overflow, settings.light_overflow,
-                     "Routing forced to Blacksmith (VEXEL_CI_ROUTE=overflow)")
+                     "Routing forced to Blacksmith (VEXEL_CI_ROUTE=overflow)", small=settings.light_overflow)
     pool = settings.pool
     if pool is None:
         return Route(None, None, "No pool configured (the route action's pool input): the runner variables decide")
@@ -315,6 +343,22 @@ def apply_budget(
     return keep_local(route, f"over budget: {state}", light)
 
 
+def with_small(route: Route, snapshot: Snapshot, settings: RouteSettings) -> Route:
+    """The small jobs' target: a reserved small runner when one is free soon, else the light route as decided."""
+    pool = settings.pool
+    if pool is None or route.light is None:
+        return route
+    if pool.small is None:
+        return Route(route.heavy, route.light, route.reason, small=route.light)
+    state = snapshot.small
+    wait = state.wait_minutes(settings.small_job_minutes)
+    described = f"{state.online} online, {state.idle} idle, {state.waiting} waiting"
+    if state.online and wait <= settings.small_wait_limit_minutes:
+        return Route(route.heavy, route.light, f"{route.reason}; small: reserved runner ({described})", small=pool.small)
+    return Route(route.heavy, route.light, f"{route.reason}; small: as light, the reserved runners are busy or offline ({described})",
+                 small=route.light)
+
+
 def fallback(error: Exception) -> Route:
     """The pre-routing behaviour: the consumer's runner variables decide."""
     return Route(None, None, f"Routing failed, so the runner variables decide: {error}")
@@ -378,8 +422,9 @@ def route_from_env(
         )
         route = apply_budget(api, own, decide(snapshot, settings), settings, now or datetime.now(timezone.utc),
                              env.get("GITHUB_RUN_ID", ""))
+        route = with_small(route, snapshot, settings)
         if notes:
-            route = Route(route.heavy, route.light, f"{route.reason}; {'; '.join(notes)}")
+            route = Route(route.heavy, route.light, f"{route.reason}; {'; '.join(notes)}", small=route.small)
         return route
     except Exception as error:  # Routing must never block CI.
         return fallback(error)
@@ -390,9 +435,10 @@ def main() -> int:
     # Empty when routing is off or failed: the consumer's jobs then read its runner variables.
     heavy = "" if route.heavy is None else json.dumps(route.heavy)
     light = "" if route.light is None else json.dumps(route.light)
+    small = "" if route.small is None else json.dumps(route.small)
     # GITHUB_OUTPUT takes one line per value; an API error message may span several.
     reason = " ".join(route.reason.split())
-    lines = [f"heavy_runs_on={heavy}", f"light_runs_on={light}", f"reason={reason}"]
+    lines = [f"heavy_runs_on={heavy}", f"light_runs_on={light}", f"small_runs_on={small}", f"reason={reason}"]
     output = os.environ.get("GITHUB_OUTPUT")
     if output:
         with open(output, "a", encoding="utf-8") as handle:
@@ -401,7 +447,8 @@ def main() -> int:
     if summary:
         with open(summary, "a", encoding="utf-8") as handle:
             handle.write(
-                f"### Runner route\n\nHeavy jobs: `{heavy or 'CI_RUNS_ON'}`. Light jobs: `{light or 'CI_LIGHT_RUNS_ON'}`.\n\n{reason}.\n"
+                f"### Runner route\n\nHeavy jobs: `{heavy or 'CI_RUNS_ON'}`. Light jobs: `{light or 'CI_LIGHT_RUNS_ON'}`. "
+                f"Small jobs: `{small or 'CI_LIGHT_RUNS_ON'}`.\n\n{reason}.\n"
             )
     print("\n".join(lines))
     return 0

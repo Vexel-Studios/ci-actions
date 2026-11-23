@@ -78,6 +78,7 @@ jobs:
       stale_base: ${{ steps.current_base.outcome == 'failure' }}
       heavy_runs_on: ${{ steps.route.outputs.heavy-runs-on }}
       light_runs_on: ${{ steps.route.outputs.light-runs-on }}
+      small_runs_on: ${{ steps.route.outputs.small-runs-on }}
     steps:
       # Cone mode always includes the root files (package.json, turbo.json) that conformance reads.
       - name: Checkout .github
@@ -282,12 +283,13 @@ jobs:
       - name: Test
         run: bun x turbo run test
 
-  # The run's one closing job, on the light route (the pool, or Blacksmith only as overflow): the
+  # The run's one closing job, on the small route (a reserved small runner, else the light route): the
   # summary and the verified-tree record, then the merge or the withdrawal, in one billed job.
   close:
     if: ${{ !cancelled() && !((github.event.action == 'labeled' && github.event.label.name != 'ci:full' && github.event.label.name != 'ci:merge') || (github.event.action == 'edited' && !github.event.changes.base) || (github.event.action == 'ready_for_review' && (github.event.sender.type == 'Bot' || contains(github.event.pull_request.labels.*.name, 'ci:merge') || contains(github.event.pull_request.labels.*.name, 'ci:full'))) || (github.event.pull_request.draft && github.event.action != 'labeled')) }}
     needs: [preflight, docs, light, quality, tests]
-    runs-on: ${{ fromJSON(needs.preflight.outputs.light_runs_on || vars.CI_LIGHT_RUNS_ON || vars.CI_RUNS_ON || '"ubuntu-24.04"') }}
+    # A reserved small runner when the pool has a free one, so a 10-second job never waits behind builds.
+    runs-on: ${{ fromJSON(needs.preflight.outputs.small_runs_on || needs.preflight.outputs.light_runs_on || vars.CI_LIGHT_RUNS_ON || vars.CI_RUNS_ON || '"ubuntu-24.04"') }}
     timeout-minutes: 10
     permissions:
       contents: read
