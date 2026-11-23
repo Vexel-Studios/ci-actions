@@ -252,7 +252,8 @@ def check_toolchain(files: Files, toolchain: Any, workflows: dict[str, str], fin
     if used:
         config = next((text for text in (files.read(f"vite.config.{ext}") for ext in ("ts", "mts", "js", "mjs")) if text is not None), None)
         for tool in used:
-            if config is None or not re.search(rf"\b{tool}\s*:", config):
+            # `lint: {...}`, or the shorthand `defineConfig({ fmt, lint })`.
+            if config is None or not re.search(rf"\b{tool}\b\s*[:,}}]", config):
                 findings.append(Finding("toolchain.vite-config", f"`vp {tool}` is used but the root vite.config has no `{tool}` section"))
 
 
