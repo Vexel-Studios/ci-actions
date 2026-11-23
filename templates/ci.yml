@@ -284,7 +284,7 @@ jobs:
         run: bun x turbo run test
 
   # The run's one closing job, on the small route (a reserved small runner, else the light route): the
-  # summary and the verified-tree record, then the merge or the withdrawal, in one billed job.
+  # summary and the verified-tree record, then the withdrawal of a failed ci:merge, in one billed job.
   close:
     if: ${{ !cancelled() && !((github.event.action == 'labeled' && github.event.label.name != 'ci:full' && github.event.label.name != 'ci:merge') || (github.event.action == 'edited' && !github.event.changes.base) || (github.event.action == 'ready_for_review' && (github.event.sender.type == 'Bot' || contains(github.event.pull_request.labels.*.name, 'ci:merge') || contains(github.event.pull_request.labels.*.name, 'ci:full'))) || (github.event.pull_request.draft && github.event.action != 'labeled')) }}
     needs: [preflight, docs, light, quality, tests]
@@ -294,6 +294,8 @@ jobs:
     permissions:
       contents: read
       pull-requests: write
+    outputs:
+      passed: ${{ steps.complete.outputs.passed }}
     steps:
       - name: CI complete
         id: complete
@@ -304,18 +306,6 @@ jobs:
           reason: ${{ needs.preflight.outputs.reason }}
           tree: ${{ needs.preflight.outputs.tree }}
           stale-base: ${{ needs.preflight.outputs.stale_base }}
-
-      - name: Merge the tested head
-        if: steps.complete.outputs.passed == 'true' && needs.preflight.outputs.merge_request == 'true' && needs.preflight.outputs.mode == 'full'
-        uses: Vexel-Studios/ci-actions/merge-request@v1
-        with:
-          action: merge
-          client-id: ${{ vars.VEXEL_CI_BOT_CLIENT_ID }}
-          private-key: ${{ secrets.VEXEL_CI_BOT_PRIVATE_KEY }}
-          github-token: ${{ github.token }}
-          pr-number: ${{ github.event.pull_request.number }}
-          sha: ${{ github.event.pull_request.head.sha }}
-          merge-method: ${{ vars.CI_MERGE_METHOD || 'merge' }}
 
       # After a stale base the step checks again and says to re-run on the current base.
       - name: Withdraw the merge request
@@ -332,3 +322,26 @@ jobs:
       - name: Fail the run
         if: ${{ !cancelled() && steps.complete.outputs.passed != 'true' }}
         run: exit 1
+
+  # Only a run that will merge has this job. A job's runner receives every secret the job
+  # references, whatever a step's `if:` says, so the App's write key stays off every other run.
+  merge:
+    needs: [preflight, close]
+    if: ${{ !cancelled() && needs.preflight.outputs.merge_request == 'true' && needs.preflight.outputs.mode == 'full' && needs.close.outputs.passed == 'true' }}
+    runs-on: ${{ fromJSON(needs.preflight.outputs.small_runs_on || needs.preflight.outputs.light_runs_on || vars.CI_LIGHT_RUNS_ON || vars.CI_RUNS_ON || '"ubuntu-24.04"') }}
+    timeout-minutes: 10
+    permissions:
+      contents: read
+      pull-requests: write
+    steps:
+      - name: Merge the tested head
+        uses: Vexel-Studios/ci-actions/merge-request@v1
+        with:
+          action: merge
+          client-id: ${{ vars.VEXEL_CI_BOT_CLIENT_ID }}
+          private-key: ${{ secrets.VEXEL_CI_BOT_PRIVATE_KEY }}
+          github-token: ${{ github.token }}
+          pr-number: ${{ github.event.pull_request.number }}
+          sha: ${{ github.event.pull_request.head.sha }}
+          merge-method: ${{ vars.CI_MERGE_METHOD || 'merge' }}
+
