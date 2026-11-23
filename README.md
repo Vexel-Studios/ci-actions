@@ -47,6 +47,13 @@ overflows. The App behind `client-id` and `private-key` needs organization self-
 read. An empty `pool`, a missing token or any error reading GitHub gives empty outputs, and the consumer's
 `CI_RUNS_ON` and `CI_LIGHT_RUNS_ON` variables decide.
 
+A pool may also reserve small runners for short jobs (a closing job, a quick check): `"small": ["pool-small",
+"pool-x64"]` is their `runs-on`, route label first, and `"small_runner_labels"` the labels each of them carries,
+which must include that route label. The `small-runs-on` output is then a reserved runner when one is free within
+about five minutes, and otherwise exactly `light-runs-on` (the pool, or Blacksmith within the budget). The choice
+is made when the run starts: a job routed to the reserved runners waits for them if they all go offline meanwhile,
+so reserve more than one when that matters.
+
 ## Versions
 
 Releases are tagged `v1.0.0`, `v1.0.1`, ... (never moved), and the major tag `v1` points at the latest `v1.x.y`.

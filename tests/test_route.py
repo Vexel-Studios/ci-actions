@@ -23,6 +23,7 @@ from vexel_ci.route import (
     read_snapshot,
     route_from_env,
     settings_from_env,
+    with_small,
 )
 
 # A consumer's pool as its route action's `pool` input describes it.
@@ -125,6 +126,65 @@ class ReadSnapshotTest(unittest.TestCase):
         api = FakeApi([runner(1, POOL_RUNNER)])
         read_snapshot(api, POOL, org=ORG, repositories=(APP,))
         self.assertFalse(any(SITE in path for path in api.paths))
+
+
+SMALL_LABEL = "pool-small"
+SMALL_LOCAL = [SMALL_LABEL, ARCH]
+SMALL_POOL = Pool(GROUP_ID, POOL.runner_labels, HEAVY_LOCAL, LIGHT_LOCAL, 0, SMALL_LOCAL, frozenset({HOST, ARCH, SMALL_LABEL}))
+# A pool whose runners need only host and arch: a reserved runner matches it too, so the order counts.
+BROAD_POOL = Pool(GROUP_ID, frozenset({HOST, ARCH}), HEAVY_LOCAL, LIGHT_LOCAL, 0, SMALL_LOCAL, frozenset({HOST, ARCH, SMALL_LABEL}))
+SMALL_RUNNER = [{"name": n} for n in (HOST, ARCH, SMALL_LABEL)]
+
+
+class SmallRouteTest(unittest.TestCase):
+    """Short jobs take a reserved small runner when it is free soon, else the light route as decided."""
+
+    settings = RouteSettings(pool=SMALL_POOL)
+    light_local = Route(HEAVY_LOCAL, LIGHT_LOCAL, "r")
+    light_overflow = Route(HEAVY_LOCAL, LIGHT_OVERFLOW, "r")
+
+    def test_a_free_reserved_runner_takes_the_small_jobs(self):
+        route = with_small(self.light_local, Snapshot(small=PoolState(1, 1, 0)), self.settings)
+        self.assertEqual(route.small, SMALL_LOCAL)
+
+    def test_a_busy_or_offline_reserved_runner_sends_them_the_light_way(self):
+        # Two small jobs ahead on one busy runner: about 6 minutes, over the 5-minute limit.
+        for snapshot in (Snapshot(small=PoolState(1, 0, 2)), Snapshot()):
+            for route in (self.light_local, self.light_overflow):
+                with self.subTest(snapshot=snapshot, light=route.light):
+                    self.assertEqual(with_small(route, snapshot, self.settings).small, route.light)
+
+    def test_without_reserved_runners_small_is_light_and_routing_off_stays_empty(self):
+        self.assertEqual(with_small(self.light_local, Snapshot(), RouteSettings(pool=POOL)).small, LIGHT_LOCAL)
+        self.assertIsNone(with_small(Route(None, None, "off"), Snapshot(), self.settings).small)
+        self.assertEqual(decide(Snapshot(), RouteSettings(mode="overflow")).small, LIGHT_OVERFLOW)
+
+    def test_the_snapshot_counts_reserved_runners_and_their_jobs_apart_from_the_pool(self):
+        api = FakeApi(
+            runners=[runner(1, POOL_RUNNER), runner(2, SMALL_RUNNER, busy=True)],
+            runs={(APP, "queued"): [{"id": 10}]},
+            jobs={10: [queued(SMALL_LOCAL), queued(HEAVY_LOCAL)]},
+        )
+        snapshot, _ = read_snapshot(api, BROAD_POOL, org=ORG, repositories=(APP,))
+        self.assertEqual((snapshot.pool.online, snapshot.pool.waiting), (1, 1))
+        self.assertEqual((snapshot.small.online, snapshot.small.idle, snapshot.small.waiting), (1, 0, 1))
+
+    def test_the_pool_input_takes_small_and_its_labels_together(self):
+        fields = {**POOL_FIELDS, "small": SMALL_LOCAL, "small_runner_labels": [HOST, ARCH, SMALL_LABEL]}
+        self.assertEqual(pool_from_json(json.dumps(fields)).small, SMALL_LOCAL)
+        for bad in ({**POOL_FIELDS, "small": SMALL_LOCAL}, {**POOL_FIELDS, "small": SMALL_LOCAL, "small_runner_labels": [HOST, ARCH]}):
+            with self.subTest(bad=bad), self.assertRaises(ValueError):
+                pool_from_json(json.dumps(bad))
+
+    def test_small_jobs_never_get_blacksmith_beyond_the_budget(self):
+        # The reserved runner is busy and the pool backed up, so both would overflow; without a share
+        # the light jobs wait for the pool, and the small ones follow them there.
+        fields = {**POOL_FIELDS, "small": SMALL_LOCAL, "small_runner_labels": [HOST, ARCH, SMALL_LABEL]}
+        api = FakeApi([runner(1, POOL_RUNNER, busy=True), runner(2, SMALL_RUNNER, busy=True)],
+                      runs={(APP, "queued"): [{"id": 10}]}, jobs={10: [queued(HEAVY_LOCAL)] * 5 + [queued(SMALL_LOCAL)] * 3})
+        env = {"GH_TOKEN": "t", "GITHUB_REPOSITORY": APP, "VEXEL_CI_POOL": json.dumps(fields)}
+        route = route_from_env(env, api_factory=lambda token: api, now=NOW)
+        self.assertEqual((route.light, route.small), (LIGHT_LOCAL, LIGHT_LOCAL))
 
 
 class DecideTest(unittest.TestCase):
@@ -360,6 +420,7 @@ class RouteFromEnvTest(unittest.TestCase):
                 values = dict(line.split("=", 1) for line in handle.read().splitlines())
         self.assertEqual(json.loads(values["heavy_runs_on"]), HEAVY_OVERFLOW)
         self.assertEqual(json.loads(values["light_runs_on"]), LIGHT_OVERFLOW)
+        self.assertEqual(json.loads(values["small_runs_on"]), LIGHT_OVERFLOW)
 
     def test_main_writes_empty_outputs_when_routing_is_off(self):
         with tempfile.TemporaryDirectory() as directory:
