@@ -66,7 +66,7 @@ RULES = {
     "runners.blacksmith-2vcpu": "Blacksmith only at 2 vCPU",
     "runners.no-fixed-blacksmith": "No job is fixed to Blacksmith",
     "cost.router-only": "Only the router job (and the label reset) runs on CI_ROUTER_RUNS_ON",
-    "cost.closing-job": "Merge and blocked run in the closing job, not jobs of their own",
+    "cost.closing-job": "Blocked runs in the closing job; merge there or in a job that exists only in merge runs",
 }
 TYPESCRIPT_ONLY = {
     "toolchain.bun", "toolchain.vite-plus", "toolchain.code-style", "toolchain.turbo", "toolchain.task-runner",
@@ -308,6 +308,11 @@ def check_workflows(
         findings.append(Finding("flow.complete", f"No job in {ci_path} calls {ACTIONS}complete"))
     for job in jobs:
         merges = [step for step in ("merge", "blocked") if re.search(rf"^\s+action: {step}\s*$", job.body, re.MULTILINE)]
+        # A merge job gated at job level on the merge request exists only in a run that merges: it
+        # costs no job in other runs and keeps the App's write key off their runners.
+        gated = bool(re.search(r"^    if:.*\bmerge_request\b", job.body, re.MULTILINE))
+        if gated and merges == ["merge"]:
+            continue
         if merges and job not in closing:
             findings.append(Finding("cost.closing-job", f"Job `{job.name}` runs merge-request {' and '.join(merges)} on its own; fold it into the closing job"))
 
