@@ -63,6 +63,10 @@ class ConformanceTest(unittest.TestCase):
         self.assertEqual(self.rules(), {"toolchain.vite-config"})
         self.write("vite.config.ts", "export default defineConfig({\n  lint: lintConfig,\n  fmt: fmtConfig,\n})\n")
         self.assertEqual(self.rules(), set())
+        for shorthand in ("export default defineConfig({ fmt, lint })\n", "export default defineConfig({\n  lint,\n  fmt\n})\n"):
+            with self.subTest(shorthand=shorthand):
+                self.write("vite.config.ts", shorthand)
+                self.assertEqual(self.rules(), set())
 
     def test_a_corepack_hash_and_a_node_expression_still_conform(self):
         self.write("package.json", json.dumps(package(packageManager=f"bun@{TOOLS.bun}+sha512.abc")))
