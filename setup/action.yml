@@ -1,0 +1,85 @@
+name: Vexel CI setup
+description: >-
+  Install the repository's pinned Bun (from package.json's packageManager) and the standard's Node,
+  then the dependencies with a frozen lockfile; vite-plus (vp), Turbo and the code-style package
+  come with them. On a self-hosted runner with a persistent Bun cache the install is warm; overflow
+  runs on Blacksmith install cold.
+
+inputs:
+  node-version:
+    description: >-
+      Node's major version. The standard's (vexel_ci/standard.py, node_major); a repository changes
+      it only as a recorded deviation.
+    required: false
+    default: '24'
+  bun-version-file:
+    description: The file setup-bun reads Bun's version from.
+    required: false
+    default: package.json
+  swap-size-gb:
+    description: >-
+      Swap space to add, in GB, for jobs whose builds outgrow the runner's RAM, on GitHub-hosted
+      runners only (the pool's containers have the memory instead, and their host's swap is not
+      theirs to change). 0 keeps the runner's default.
+    required: false
+    default: '0'
+  scan-dependencies:
+    description: >-
+      'false' installs without bunfig.toml's [install.security] advisory scanner, for a run whose
+      change leaves the dependencies as they are on its base (the scope action's `dependencies`):
+      the packages are the base's, and a new advisory against one of them is no fault of the
+      change. Anything else scans, as a local install does.
+    required: false
+    default: 'true'
+
+runs:
+  using: composite
+  steps:
+    - name: Add swap space
+      if: inputs.swap-size-gb != '0' && runner.environment == 'github-hosted'
+      shell: bash
+      env:
+        SWAP_SIZE_GB: ${{ inputs.swap-size-gb }}
+      run: |
+        swapfile=/mnt/swapfile
+        if [ ! -d /mnt ] || [ "$(df --output=avail -BG /mnt | tail -1 | tr -dc '0-9')" -lt "$((SWAP_SIZE_GB + 2))" ]; then
+          swapfile=/swapfile-ci
+        fi
+        free -m
+        sudo swapoff -a
+        sudo rm -f /mnt/swapfile
+        sudo fallocate -l "${SWAP_SIZE_GB}G" "$swapfile"
+        sudo chmod 600 "$swapfile"
+        sudo mkswap "$swapfile" > /dev/null
+        sudo swapon "$swapfile"
+        free -m
+
+    - name: Install Bun
+      uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
+      with:
+        bun-version-file: ${{ inputs.bun-version-file }}
+
+    - name: Install Node.js
+      uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+      with:
+        node-version: ${{ inputs.node-version }}
+
+    # Without the scan, the install reads a copy of bunfig.toml without its [install.security]
+    # section (Bun has no flag or variable that turns the scanner off); every other setting stays.
+    - name: Install dependencies
+      shell: bash
+      env:
+        SCAN_DEPENDENCIES: ${{ inputs.scan-dependencies }}
+      run: |
+        if [ "$SCAN_DEPENDENCIES" != false ] || [ ! -f bunfig.toml ]; then
+          bun install --frozen-lockfile
+          exit 0
+        fi
+        config="$RUNNER_TEMP/bunfig.without-scanner.toml"
+        awk '/^\[install\.security\]/ { skip = 1; next } /^\[/ { skip = 0 } !skip' bunfig.toml > "$config"
+        if grep -q 'scanner' "$config"; then
+          echo "::error::bunfig.toml names a scanner outside [install.security]; update the Vexel CI setup action."
+          exit 1
+        fi
+        echo "The dependencies are the base's: installing without the advisory scanner."
+        bun --config="$config" install --frozen-lockfile

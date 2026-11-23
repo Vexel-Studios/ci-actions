@@ -1,0 +1,69 @@
+name: Vexel CI complete
+description: >-
+  The first step of a run's one closing job (vexel_ci/complete.py, README.md): sum the run up from its jobs' results, write the summary, and for a passed full run upload
+  the ci-full-passed-<tree> record that makes a later push of the same tree to the integration
+  branch verified. It does not fail the job: its `passed` output decides the closing job's merge or
+  blocked step, and the job's last step fails the run.
+
+inputs:
+  needs:
+    description: The closing job's needs context, as `toJson(needs)`.
+    required: true
+  mode:
+    description: The scope action's mode.
+    required: false
+    default: ''
+  reason:
+    description: The scope action's reason.
+    required: false
+    default: ''
+  tree:
+    description: The scope action's tree.
+    required: false
+    default: ''
+  stale-base:
+    description: "'true' when the router job stopped the run on a stale merge commit."
+    required: false
+    default: 'false'
+  router-job:
+    description: The router job's id; it must have succeeded, while other skipped jobs were left out by the scope.
+    required: false
+    default: preflight
+
+outputs:
+  passed:
+    description: "'true' when every job passed or was left out by the scope."
+    value: ${{ steps.complete.outputs.passed }}
+  mode:
+    description: The run's mode, as the scope decided it.
+    value: ${{ steps.complete.outputs.mode }}
+
+runs:
+  using: composite
+  steps:
+    - name: CI complete
+      id: complete
+      shell: bash
+      env:
+        NEEDS_JSON: ${{ inputs.needs }}
+        MODE: ${{ inputs.mode }}
+        REASON: ${{ inputs.reason }}
+        TREE: ${{ inputs.tree }}
+        STALE_BASE: ${{ inputs.stale-base }}
+        ROUTER_JOB: ${{ inputs.router-job }}
+        HEAD_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
+        EVENT: ${{ github.event_name }}${{ github.event.action && format(' ({0})', github.event.action) || '' }}
+        VEXEL_CI_ROOT: ${{ github.action_path }}/..
+      run: python3 -I "$VEXEL_CI_ROOT/run.py" vexel_ci.complete
+
+    # Only an optimisation (a later push of this tree runs nothing): a failed upload must not stop
+    # the merge or leave the request label without a word.
+    - name: Upload the record of the passed full run
+      if: steps.complete.outputs.record != ''
+      continue-on-error: true
+      uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+      with:
+        name: ${{ steps.complete.outputs.record }}
+        path: ${{ steps.complete.outputs.record_path }}
+        overwrite: true
+        retention-days: 7

@@ -1,0 +1,31 @@
+name: Vexel CI conformance
+description: >-
+  Report where this repository differs from the Vexel CI standard it declares in
+  .github/vexel-ci.json (vexel_ci/conformance.py, README.md): tool versions,
+  runner routing, Blacksmith sizes, the required jobs and labels. It writes the report to the job
+  summary and a warning per violation; with strict it fails the step too. Run it in the router job
+  after a checkout that includes the root files and .github (a sparse checkout of .github has both).
+
+inputs:
+  strict:
+    description: "'true' fails the step on a violation that the manifest does not record as a deviation."
+    required: false
+    default: 'false'
+  path:
+    description: The checkout to check.
+    required: false
+    default: .
+
+runs:
+  using: composite
+  steps:
+    - name: Check the repository against the Vexel CI standard
+      shell: bash
+      env:
+        STRICT: ${{ inputs.strict }}
+        CHECKOUT: ${{ inputs.path }}
+        VEXEL_CI_ROOT: ${{ github.action_path }}/..
+      run: |
+        strict=()
+        if [ "$STRICT" = true ]; then strict=(--strict); fi
+        python3 -I "$VEXEL_CI_ROOT/run.py" vexel_ci.conformance --root "$CHECKOUT" "${strict[@]}"

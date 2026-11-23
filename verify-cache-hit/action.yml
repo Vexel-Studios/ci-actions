@@ -1,0 +1,35 @@
+name: Vexel CI cached task re-check
+description: >-
+  Run one task that was replayed from the remote Turbo cache again, for real, and fail when it
+  fails: a replayed pass is only as good as the task's declared inputs (vexel_ci/cache_check.py,
+  README.md). Without dry-run it reads this job's own turbo run summaries (the
+  turbo-cache action turns them on). With dry-run it reads a `turbo run <task> --dry=json` that
+  the job wrote before its first turbo run, for tasks another job replays: the merge gate's one
+  cached test task, re-checked off the test jobs' critical path. Run it only when the turbo-cache
+  action's reads-remote output is 'true'.
+
+inputs:
+  dry-run:
+    description: Path of a `turbo run <task> --dry=json` output; empty reads .turbo/runs.
+    required: false
+    default: ''
+  turbo-command:
+    description: How to start turbo.
+    required: false
+    default: bun x turbo
+
+runs:
+  using: composite
+  steps:
+    - name: Run one cached task again
+      shell: bash
+      env:
+        DRY_RUN: ${{ inputs.dry-run }}
+        TURBO_COMMAND: ${{ inputs.turbo-command }}
+        VEXEL_CI_ROOT: ${{ github.action_path }}/..
+      run: |
+        if [ -n "$DRY_RUN" ]; then
+          python3 -I "$VEXEL_CI_ROOT/run.py" vexel_ci.cache_check "$DRY_RUN"
+        else
+          python3 -I "$VEXEL_CI_ROOT/run.py" vexel_ci.cache_check
+        fi
