@@ -176,6 +176,13 @@ class ConformanceTest(unittest.TestCase):
         self.assertIn("1 recorded but not triggered", text)
         self.assertIn("deviation (recorded, not triggered): one test job", text)
 
+    def test_a_gated_merge_job_may_withdraw_its_own_refused_merge(self):
+        # Mine-imator re-checks the base right before the merge and withdraws the request when it refuses.
+        self.edit_ci("          merge-method: ${{ vars.CI_MERGE_METHOD || 'merge' }}\n",
+                     "          merge-method: ${{ vars.CI_MERGE_METHOD || 'merge' }}\n"
+                     "      - if: failure()\n        uses: Vexel-Studios/ci-actions/merge-request@v1\n        with:\n          action: blocked\n")
+        self.assertEqual(self.rules(), set())
+
     def test_an_incomplete_deviation_records_nothing(self):
         manifest = json.loads((TEMPLATES / "vexel-ci.json").read_text())
         manifest["deviations"] = [{"rule": "toolchain.bun", "reason": "", "decided": "2026-11-23", "by": "the owner"},
