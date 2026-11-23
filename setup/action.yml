@@ -54,6 +54,13 @@ runs:
         sudo swapon "$swapfile"
         free -m
 
+    # Node 22+ keeps its compile cache in os.tmpdir()/node-compile-cache, which on the self-hosted
+    # runners is the /tmp tmpfs: it outlives the job, grows with every repository's jobs (about
+    # 0.4 GB seen) and counts against the container's memory. RUNNER_TEMP is emptied after each job.
+    - name: Keep Node's compile cache in the job's temporary directory
+      shell: bash
+      run: echo "NODE_COMPILE_CACHE=$RUNNER_TEMP/node-compile-cache" >> "$GITHUB_ENV"
+
     - name: Install Bun
       uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
       with:
