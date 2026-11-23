@@ -4,7 +4,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from vexel_ci.conformance import LocalFiles, check_repository
+from vexel_ci.conformance import LocalFiles, check_repository, report
 from vexel_ci.standard import LATEST, STANDARDS
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -94,7 +94,8 @@ class ConformanceTest(unittest.TestCase):
             "fixed 4 vCPU": (
                 "  tests:\n    needs: preflight\n    if: needs.preflight.outputs.mode == 'full' && needs.preflight.outputs.docs_only != 'true'\n    runs-on: ${{ fromJSON(needs.preflight.outputs.heavy_runs_on || vars.CI_RUNS_ON || '\"ubuntu-24.04\"') }}",
                 "  tests:\n    needs: preflight\n    if: needs.preflight.outputs.mode == 'full' && needs.preflight.outputs.docs_only != 'true'\n    runs-on: blacksmith-4vcpu-ubuntu-2404",
-                {"runners.blacksmith-2vcpu", "runners.no-fixed-blacksmith", "runners.routed"},
+                # The tests job leaves the heavy route too, so there is no tests job left.
+                {"runners.blacksmith-2vcpu", "runners.no-fixed-blacksmith", "runners.routed", "flow.tests-job"},
             ),
             # The closing job on the router's Blacksmith runner.
             "closing job on the router": (
@@ -152,6 +153,24 @@ class ConformanceTest(unittest.TestCase):
         self.write("package.json", json.dumps(package(packageManager="bun@1.4.4")))
         findings = self.findings()
         self.assertEqual([(f.rule, f.deviation) for f in findings], [("toolchain.bun", "Bun 1.4.5 breaks the Workers tests")])
+
+    def test_the_tests_job_and_the_light_tests_scope(self):
+        self.edit_ci("      - name: Test\n        run: bun x turbo run test\n", "      - name: Lint\n        run: bun x turbo run lint && bun x turbo run test\n")
+        self.assertEqual(self.rules(), {"flow.tests-job"})
+        self.setUp()
+        self.edit_ci('scope=("--filter=[$TURBO_SCM_BASE]")', 'scope=()')
+        self.assertEqual(self.rules(), {"flow.light-tests-scope"})
+
+    def test_a_recorded_deviation_that_finds_nothing_is_still_reported(self):
+        manifest = json.loads((TEMPLATES / "vexel-ci.json").read_text())
+        manifest["deviations"] = [{"rule": "flow.tests-job", "reason": "one test job", "decided": "2026-11-23", "by": "the owner"}]
+        self.write(".github/vexel-ci.json", json.dumps(manifest))
+        findings = self.findings()
+        self.assertEqual([(f.rule, f.deviation, f.triggered) for f in findings], [("flow.tests-job", "one test job", False)])
+        self.assertEqual(self.rules(), set())
+        text = report("example-org/app", "1", findings)
+        self.assertIn("1 recorded but not triggered", text)
+        self.assertIn("deviation (recorded, not triggered): one test job", text)
 
     def test_an_incomplete_deviation_records_nothing(self):
         manifest = json.loads((TEMPLATES / "vexel-ci.json").read_text())

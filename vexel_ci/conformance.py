@@ -60,6 +60,8 @@ RULES = {
     "flow.turbo-cache": "Jobs connect the remote Turbo cache with the turbo-cache action",
     "flow.cache-recheck": "The merge gate runs one cached task again",
     "flow.light-tests": "Light runs check the affected packages (turbo --affected) and changed tests (--changed)",
+    "flow.light-tests-scope": "Light runs test only the touched packages (turbo --filter=[base])",
+    "flow.tests-job": "Full runs test in a job of their own on the heavy route, apart from the other checks",
     "runners.routed": "Every CI job takes its runner from the route",
     "runners.blacksmith-2vcpu": "Blacksmith only at 2 vCPU",
     "runners.no-fixed-blacksmith": "No job is fixed to Blacksmith",
@@ -70,6 +72,7 @@ TYPESCRIPT_ONLY = {
     "toolchain.bun", "toolchain.vite-plus", "toolchain.code-style", "toolchain.turbo", "toolchain.task-runner",
     "toolchain.vite-config",
     "flow.scope", "flow.router-permissions", "flow.setup", "flow.turbo-cache", "flow.cache-recheck", "flow.light-tests",
+    "flow.light-tests-scope", "flow.tests-job",
 }
 # A Blacksmith runner label anywhere in a text; the number is its vCPUs.
 BLACKSMITH_SIZE = re.compile(r"blacksmith-(\d+)vcpu")
@@ -81,6 +84,7 @@ class Finding:
     rule: str
     message: str
     deviation: str = ""  # the recorded reason, when the manifest records this rule as a deviation
+    triggered: bool = True  # False: a recorded deviation whose rule found nothing (it may be stale)
 
 
 class Files:
@@ -326,6 +330,17 @@ def check_workflows(
             findings.append(Finding("flow.light-tests", f"{ci_path} and .github/scripts never run `turbo --affected`"))
         if "--changed" not in light:
             findings.append(Finding("flow.light-tests", f"{ci_path} and .github/scripts never narrow the light tests with Vitest `--changed`"))
+        if "--filter=[" not in light:
+            findings.append(Finding("flow.light-tests-scope", f"{ci_path} and .github/scripts never limit the light tests to the touched packages (`--filter=[base]`)"))
+        # The tests job: on the heavy route, runs the test task for real (not a --dry listing), and
+        # leaves lint to another job, so the tests are not on the checks' critical path.
+        test_jobs = [
+            job for job in jobs
+            if "heavy_runs_on" in job.runs_on and "turbo run lint" not in job.body
+            and any("turbo run test" in line and "--dry" not in line for line in job.body.splitlines())
+        ]
+        if not test_jobs:
+            findings.append(Finding("flow.tests-job", f"{ci_path} has no job on the heavy route that runs the tests on their own"))
 
 
 def _labels_text(text: str) -> str:
@@ -407,7 +422,14 @@ def check_repository(files: Files, remote: Callable[[list[Finding]], None] | Non
         entry["rule"]: entry["reason"] for entry in manifest.get("deviations") or []
         if isinstance(entry, dict) and not deviation_problem(entry)
     }
-    return version, [Finding(f.rule, f.message, recorded.get(f.rule, "")) for f in findings]
+    reported = [Finding(f.rule, f.message, recorded.get(f.rule, "")) for f in findings]
+    found = {f.rule for f in findings}
+    # A recorded deviation whose rule finds nothing is listed too, so it is seen (and dropped once stale).
+    reported += [
+        Finding(rule, "Recorded deviation; the rule finds nothing", reason, triggered=False)
+        for rule, reason in recorded.items() if rule not in found
+    ]
+    return version, reported
 
 
 def remote_checks(api: GitHubApi, repository: str) -> Callable[[list[Finding]], None]:
@@ -440,15 +462,24 @@ def remote_checks(api: GitHubApi, repository: str) -> Callable[[list[Finding]], 
 
 def report(name: str, version: str, findings: list[Finding]) -> str:
     violations = [f for f in findings if not f.deviation]
-    deviations = [f for f in findings if f.deviation]
+    deviations = [f for f in findings if f.deviation and f.triggered]
+    untriggered = [f for f in findings if f.deviation and not f.triggered]
     behind = f" (latest is {LATEST})" if version != LATEST else ""
     lines = [f"### Vexel CI standard {version}{behind}: {name}", ""]
     if not findings:
         lines.append("Conforms: no finding.")
     else:
-        lines += [f"{len(violations)} violation(s), {len(deviations)} recorded deviation(s).", "", "| Rule | Finding | Status |", "| --- | --- | --- |"]
-        for finding in violations + deviations:
-            status = f"deviation: {finding.deviation}" if finding.deviation else "violation"
+        lines += [
+            f"{len(violations)} violation(s), {len(deviations)} recorded deviation(s), {len(untriggered)} recorded but not triggered.",
+            "", "| Rule | Finding | Status |", "| --- | --- | --- |",
+        ]
+        for finding in violations + deviations + untriggered:
+            if not finding.deviation:
+                status = "violation"
+            elif finding.triggered:
+                status = f"deviation: {finding.deviation}"
+            else:
+                status = f"deviation (recorded, not triggered): {finding.deviation}"
             lines.append(f"| `{finding.rule}` | {finding.message.replace('|', '/')} | {status.replace('|', '/')} |")
     return "\n".join(lines) + "\n"
 
