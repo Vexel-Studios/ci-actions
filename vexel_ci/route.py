@@ -20,7 +20,9 @@ action's input): once the repository's Blacksmith minutes reach its share, overf
 for the pool instead.
 
 A failure to read GitHub, or no pool, never fails the run: the outputs are then empty, so the
-consumer's jobs use its CI_RUNS_ON / CI_LIGHT_RUNS_ON variables. Forced `local` mode does the same.
+consumer's jobs use its CI_RUNS_ON / CI_LIGHT_RUNS_ON variables. Forced `local` mode leaves heavy and
+light to those variables too, but its small jobs still take the pool's reserved small runners when
+they are free soon: those runners are the consumer's own pool, which is what `local` keeps it on.
 """
 
 from __future__ import annotations
@@ -349,7 +351,9 @@ def apply_budget(
 def with_small(route: Route, snapshot: Snapshot, settings: RouteSettings) -> Route:
     """The small jobs' target: a reserved small runner when one is free soon, else the light route as decided."""
     pool = settings.pool
-    if pool is None or route.light is None:
+    # Routing off leaves small empty too, except in forced local mode: the reserved runners are the
+    # consumer's own pool, so its small jobs take them when free and the runner variables otherwise.
+    if pool is None or (route.light is None and settings.mode != "local"):
         return route
     if pool.small is None:
         return Route(route.heavy, route.light, route.reason, small=route.light)
@@ -386,10 +390,13 @@ def settings_from_env(env: dict[str, str]) -> RouteSettings:
     mode = (env.get("ROUTE_MODE", "") or "auto").strip().lower()
     if mode not in {"auto", "local", "overflow"}:
         raise ValueError(f"ROUTE_MODE must be auto, local or overflow, not {mode!r}")
-    if mode != "auto":
-        # Forced modes never read the pool or the budget.
+    if mode == "overflow":
+        # Forced overflow never reads the pool or the budget.
         return RouteSettings(mode=mode, heavy_overflow=labels("HEAVY_OVERFLOW", HEAVY_OVERFLOW),
                              light_overflow=labels("LIGHT_OVERFLOW", LIGHT_OVERFLOW))
+    if mode == "local":
+        # Forced local reads only the pool's reserved small runners (with_small), never the budget.
+        return RouteSettings(mode=mode, pool=pool_from_json(env.get("VEXEL_CI_POOL", "")))
     pool = pool_from_json(env.get("VEXEL_CI_POOL", ""))
     return RouteSettings(
         mode=mode,
@@ -411,7 +418,7 @@ def route_from_env(
     """Decide a route; any error reading settings or GitHub gives the local fallback."""
     try:
         settings = settings_from_env(env)
-        if settings.mode != "auto" or settings.pool is None:
+        if settings.pool is None or settings.mode == "overflow" or (settings.mode == "local" and settings.pool.small is None):
             return decide(Snapshot(), settings)
         token = env.get("GH_TOKEN", "").strip()
         if not token:
@@ -423,8 +430,9 @@ def route_from_env(
         snapshot, notes = read_snapshot(
             api, settings.pool, org=own.split("/")[0], repositories=(own,), current_run_id=env.get("GITHUB_RUN_ID", "")
         )
-        route = apply_budget(api, own, decide(snapshot, settings), settings, now or datetime.now(timezone.utc),
-                             env.get("GITHUB_RUN_ID", ""))
+        route = decide(snapshot, settings)
+        if settings.mode == "auto":
+            route = apply_budget(api, own, route, settings, now or datetime.now(timezone.utc), env.get("GITHUB_RUN_ID", ""))
         route = with_small(route, snapshot, settings)
         if notes:
             route = Route(route.heavy, route.light, f"{route.reason}; {'; '.join(notes)}", small=route.small)

@@ -27,7 +27,9 @@ inputs:
     required: false
     default: ''
   mode:
-    description: auto, local (never overflow) or overflow (always Blacksmith). Repository variable VEXEL_CI_ROUTE.
+    description: >-
+      auto, local (never overflow: heavy and light jobs use the runner variables, small jobs still take a
+      free reserved small runner) or overflow (always Blacksmith). Repository variable VEXEL_CI_ROUTE.
     required: false
     default: auto
   overflow-after-minutes:
@@ -64,7 +66,7 @@ runs:
     # Read-only: the runner group and this repository's queued jobs, in the consumer's own organization.
     - name: Mint a read-only App token
       id: token
-      if: inputs.client-id != '' && inputs.private-key != '' && inputs.mode == 'auto' && inputs.pool != ''
+      if: inputs.client-id != '' && inputs.private-key != '' && inputs.mode != 'overflow' && inputs.pool != ''
       continue-on-error: true
       uses: actions/create-github-app-token@64ab729a6294000f5aa4a4bc0b73d1f32bc45510 # v3.3.0
       with:

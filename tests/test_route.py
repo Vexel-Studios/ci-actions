@@ -176,6 +176,19 @@ class SmallRouteTest(unittest.TestCase):
             with self.subTest(bad=bad), self.assertRaises(ValueError):
                 pool_from_json(json.dumps(bad))
 
+    def test_forced_local_keeps_small_jobs_on_a_free_reserved_runner(self):
+        # `local` keeps a consumer on its own pool, and the reserved small runners are part of it.
+        fields = {**POOL_FIELDS, "small": SMALL_LOCAL, "small_runner_labels": [HOST, ARCH, SMALL_LABEL]}
+        env = {"ROUTE_MODE": "local", "GH_TOKEN": "t", "GITHUB_REPOSITORY": APP, "VEXEL_CI_POOL": json.dumps(fields)}
+        for runners, small in (([runner(1, POOL_RUNNER), runner(2, SMALL_RUNNER)], SMALL_LOCAL),
+                               ([runner(1, POOL_RUNNER), runner(2, SMALL_RUNNER, status="offline")], None)):
+            api = FakeApi(runners)
+            with self.subTest(small=small):
+                route = route_from_env(env, api_factory=lambda token: api, now=NOW)
+                # Heavy and light stay with the runner variables; offline reserved runners leave small to them too.
+                self.assertEqual((route.heavy, route.light, route.small), (None, None, small))
+                self.assertFalse([path for path in api.paths if "created=" in path], "local mode never reads the budget")
+
     def test_small_jobs_never_get_blacksmith_beyond_the_budget(self):
         # The reserved runner is busy and the pool backed up, so both would overflow; without a share
         # the light jobs wait for the pool, and the small ones follow them there.
