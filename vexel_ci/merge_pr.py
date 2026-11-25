@@ -5,7 +5,8 @@ current head. The consumer's CI then runs the full suite once on that head and c
 module through the `merge-request` action:
 
 - merge: the full run passed. Merge the PR with the tested head SHA pinned, so GitHub refuses
-  if anything was pushed meanwhile. A draft is marked ready first.
+  if anything was pushed meanwhile. A draft is marked ready first. GitHub can merge and still
+  answer 5xx, so after a 5xx or no answer the PR is read again: merged on the tested head is success.
 - blocked: the full run failed. Remove the request labels and say why on the PR.
 - reset: a new commit arrived. Its approval is gone, so remove the request labels.
 - abort: the merge step failed before it reached GitHub (for example the App token could not
@@ -76,7 +77,30 @@ class PullRequest:
         return result or {}
 
 
-def merge(pr: PullRequest, *, tested_sha: str, method: str, run_url: str) -> tuple[int, str]:
+def merged_anyway(pr: PullRequest, error: GitHubApiError, tested_sha: str, sleep: Callable[[float], None]) -> str:
+    """The merge commit when a merge call that failed with a 5xx or no answer landed the tested head anyway, else "".
+
+    GitHub can merge and then answer 502; a 4xx (conflict, protection, moved head) never merged.
+    """
+    if error.status is not None and error.status < 500:
+        return ""
+    for attempt in (1, 2, 3):
+        sleep(attempt * 5)
+        try:
+            pull = pr.read()
+        except GitHubApiError:
+            continue
+        if pull.get("merged"):
+            # The PUT pinned the tested head, so a merged PR on that head is this merge.
+            if (pull.get("head") or {}).get("sha") != tested_sha:
+                return ""
+            return pull.get("merge_commit_sha") or "unknown"
+    return ""
+
+
+def merge(
+    pr: PullRequest, *, tested_sha: str, method: str, run_url: str, sleep: Callable[[float], None] = time.sleep
+) -> tuple[int, str]:
     """Merge when the PR still carries the approval for the tested head; never merge another head."""
     pull = pr.read()
     if pull.get("merged"):
@@ -104,23 +128,34 @@ def merge(pr: PullRequest, *, tested_sha: str, method: str, run_url: str) -> tup
         )
         return 0, f"#{pr.number} targets another open PR's branch ({base_ref}); not merging."
 
-    try:
-        if pull.get("draft"):
+    if pull.get("draft"):
+        try:
             pr.mark_ready(pull["node_id"])
-        result = pr.merge(tested_sha, method)
+        except GitHubApiError as error:
+            return withdraw_failed_merge(pr, error, tested_sha=tested_sha, run_url=run_url)
+    late = ""
+    try:
+        merged_sha = pr.merge(tested_sha, method).get("sha", "")
     except GitHubApiError as error:
-        pr.remove_label(MERGE_LABEL)
-        pr.comment(
-            f"Vexel CI could not merge `{tested_sha[:12]}` after the [full run]({run_url}) passed: {error}\n\n"
-            f"I removed `{MERGE_LABEL}`. Resolve it (for example a conflict with the base), push, and add the label again once the new head is approved."
-        )
-        return 1, f"Merge of #{pr.number} failed: {error}"
-    merged_sha = result.get("sha", "")
+        merged_sha = merged_anyway(pr, error, tested_sha, sleep)
+        if not merged_sha:
+            return withdraw_failed_merge(pr, error, tested_sha=tested_sha, run_url=run_url)
+        late = f" (GitHub answered {error.status or 'nothing'} after the merge)"
     try:
         pr.comment(f"Merged by Vexel CI after the [full run]({run_url}) passed on `{tested_sha[:12]}` (merge commit `{merged_sha[:12]}`).")
     except GitHubApiError:
         pass  # The merge happened; a lost comment must not fail the job and trigger `abort`.
-    return 0, f"Merged #{pr.number} at {tested_sha[:12]} as {merged_sha[:12]}."
+    return 0, f"Merged #{pr.number} at {tested_sha[:12]} as {merged_sha[:12]}{late}."
+
+
+def withdraw_failed_merge(pr: PullRequest, error: GitHubApiError, *, tested_sha: str, run_url: str) -> tuple[int, str]:
+    """Withdraw the approval and explain, so a failed merge needs a new label on a fixed head."""
+    pr.remove_label(MERGE_LABEL)
+    pr.comment(
+        f"Vexel CI could not merge `{tested_sha[:12]}` after the [full run]({run_url}) passed: {error}\n\n"
+        f"I removed `{MERGE_LABEL}`. Resolve it (for example a conflict with the base), push, and add the label again once the new head is approved."
+    )
+    return 1, f"Merge of #{pr.number} failed: {error}"
 
 
 STALE_RETRY = f"Nothing was merged. Add `{MERGE_LABEL}` again to test the pull request once more."

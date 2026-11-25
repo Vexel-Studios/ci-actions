@@ -10,8 +10,9 @@ SHA = "a" * 40
 class FakeApi:
     """Records calls; serves one pull request and fails the merge when told to."""
 
-    def __init__(self, pull, merge_error=None, stacked=False, comment_error=None):
+    def __init__(self, pull, merge_error=None, stacked=False, comment_error=None, after_merge=None):
         self.pull = pull
+        self.after_merge = after_merge  # What a re-read returns once the merge call was made.
         self.merge_error = merge_error
         self.stacked = stacked
         self.comment_error = comment_error
@@ -34,6 +35,8 @@ class FakeApi:
 
     def request(self, method, path, body=None):
         self.calls.append((method, path, body))
+        if self.after_merge is not None:
+            self.pull = self.after_merge
         if self.merge_error:
             raise self.merge_error
         return {"sha": "b" * 40, "merged": True}, 200, {}
@@ -113,10 +116,27 @@ class MergeTest(unittest.TestCase):
         self.assertEqual(code, 0)
         self.assertIn("Merged", message)
 
+    def test_a_merge_github_answers_502_for_after_landing_it_succeeds(self):
+        # vexel-mine-imator run 45644328800: the PUT got 502, but the PR was merged on the tested head.
+        landed = pull(state="closed", merged=True, merge_commit_sha="e" * 40)
+        api = FakeApi(pull(), merge_error=GitHubApiError("502", status=502), after_merge=landed)
+        code, message = merge(PullRequest(api, REPO, 7), tested_sha=SHA, method="merge", run_url="https://run", sleep=lambda _: None)
+        self.assertEqual(code, 0)
+        self.assertIn("as eeeeeeeeeeee (GitHub answered 502 after the merge)", message)
+        self.assertNotIn(f"DELETE /repos/{REPO}/issues/7/labels/ci%3Amerge", api.methods())
+
+    def test_a_502_that_merged_nothing_still_withdraws_the_label(self):
+        api = FakeApi(pull(), merge_error=GitHubApiError("502", status=502))
+        code, _ = merge(PullRequest(api, REPO, 7), tested_sha=SHA, method="merge", run_url="https://run", sleep=lambda _: None)
+        self.assertEqual(code, 1)
+        self.assertIn(f"DELETE /repos/{REPO}/issues/7/labels/ci%3Amerge", api.methods())
+
     def test_failed_merge_withdraws_the_label_and_fails(self):
         api = FakeApi(pull(), merge_error=GitHubApiError("405 not mergeable", status=405))
         code, _ = self.run_merge(api)
         self.assertEqual(code, 1)
+        # A 4xx never merged, so the PR is not read again after the merge call.
+        self.assertEqual(api.methods().count(f"GET /repos/{REPO}/pulls/7"), 1)
         self.assertIn(f"DELETE /repos/{REPO}/issues/7/labels/ci%3Amerge", api.methods())
         self.assertIn(f"POST /repos/{REPO}/issues/7/comments", api.methods())
 
