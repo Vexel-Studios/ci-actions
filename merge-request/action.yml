@@ -1,8 +1,9 @@
 name: Vexel CI merge request
 description: >-
   The ci:merge label flow (vexel_ci/merge_pr.py). merge: the full run passed, so merge the
-  tested head with its SHA pinned; if this step fails before the merge call (no App token), it
-  withdraws the label with github-token. blocked: the full run failed, so remove the request
+  tested head with its SHA pinned; after a 5xx or no answer to the merge call, it re-reads the
+  pull request and succeeds if the tested head merged anyway; if this step fails before the
+  merge call (no App token), it withdraws the label with github-token. blocked: the full run failed, so remove the request
   labels and say why (with merge-sha and base-branch, after a stale merge commit, say to re-run on
   the current base instead). reset: a new commit arrived, so remove the request labels.
   check-base: the stale merge-ref guard; fail unless the tested merge commit (merge-sha) has the
