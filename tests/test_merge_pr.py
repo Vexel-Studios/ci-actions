@@ -10,9 +10,10 @@ SHA = "a" * 40
 class FakeApi:
     """Records calls; serves one pull request and fails the merge when told to."""
 
-    def __init__(self, pull, merge_error=None, stacked=False, comment_error=None, after_merge=None):
+    def __init__(self, pull, merge_error=None, stacked=False, comment_error=None, after_merge=None, base_commits=()):
         self.pull = pull
         self.after_merge = after_merge  # What a re-read returns once the merge call was made.
+        self.base_commits = list(base_commits)
         self.merge_error = merge_error
         self.stacked = stacked
         self.comment_error = comment_error
@@ -22,6 +23,8 @@ class FakeApi:
         self.calls.append(("GET", path))
         if "/pulls?state=open&head=" in path:
             return [{"number": 6}] if self.stacked else []
+        if "/commits?sha=" in path:
+            return self.base_commits
         return self.pull
 
     def post(self, path, body):
@@ -125,8 +128,19 @@ class MergeTest(unittest.TestCase):
         self.assertIn("as eeeeeeeeeeee (GitHub answered 502 after the merge)", message)
         self.assertNotIn(f"DELETE /repos/{REPO}/issues/7/labels/ci%3Amerge", api.methods())
 
+    def test_a_502_whose_merge_is_on_the_base_but_not_yet_on_the_pr_succeeds(self):
+        # ci-actions #15 on 25 November 2026: the merge commit was on main while the PR still read unmerged.
+        on_base = [{"sha": "f" * 40, "parents": [{"sha": "0" * 40}, {"sha": SHA}]}]
+        api = FakeApi(pull(), merge_error=GitHubApiError("502", status=502), base_commits=on_base)
+        code, message = merge(PullRequest(api, REPO, 7), tested_sha=SHA, method="merge", run_url="https://run", sleep=lambda _: None)
+        self.assertEqual(code, 0)
+        self.assertIn("as ffffffffffff (GitHub answered 502 after the merge)", message)
+        self.assertNotIn(f"DELETE /repos/{REPO}/issues/7/labels/ci%3Amerge", api.methods())
+
     def test_a_502_that_merged_nothing_still_withdraws_the_label(self):
-        api = FakeApi(pull(), merge_error=GitHubApiError("502", status=502))
+        # A merge of something else on the base, with the tested head only as its first parent, is not this merge.
+        elsewhere = [{"sha": "f" * 40, "parents": [{"sha": SHA}, {"sha": "0" * 40}]}]
+        api = FakeApi(pull(), merge_error=GitHubApiError("502", status=502), base_commits=elsewhere)
         code, _ = merge(PullRequest(api, REPO, 7), tested_sha=SHA, method="merge", run_url="https://run", sleep=lambda _: None)
         self.assertEqual(code, 1)
         self.assertIn(f"DELETE /repos/{REPO}/issues/7/labels/ci%3Amerge", api.methods())
