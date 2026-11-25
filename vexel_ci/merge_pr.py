@@ -6,7 +6,8 @@ module through the `merge-request` action:
 
 - merge: the full run passed. Merge the PR with the tested head SHA pinned, so GitHub refuses
   if anything was pushed meanwhile. A draft is marked ready first. GitHub can merge and still
-  answer 5xx, so after a 5xx or no answer the PR is read again: merged on the tested head is success.
+  answer 5xx, so after a 5xx or no answer the PR is read again: merged on the tested head is success,
+  and so is a merge commit on the base whose second parent is the tested head (the PR record can lag).
 - blocked: the full run failed. Remove the request labels and say why on the PR.
 - reset: a new commit arrived. Its approval is gone, so remove the request labels.
 - abort: the merge step failed before it reached GitHub (for example the App token could not
@@ -63,6 +64,11 @@ class PullRequest:
         head = urllib.parse.quote(f"{owner}:{branch}", safe="")
         return self.api.get(f"/repos/{self.repository}/pulls?state=open&head={head}&per_page=10") or []
 
+    def recent_commits(self, branch: str) -> list[dict[str, Any]]:
+        """The newest commits on `branch`, newest first."""
+        ref = urllib.parse.quote(branch, safe="")
+        return self.api.get(f"/repos/{self.repository}/commits?sha={ref}&per_page=20") or []
+
     def mark_ready(self, node_id: str) -> None:
         mutation = "mutation($id: ID!) { markPullRequestReadyForReview(input: {pullRequestId: $id}) { clientMutationId } }"
         result = self.api.post("/graphql", {"query": mutation, "variables": {"id": node_id}})
@@ -77,10 +83,14 @@ class PullRequest:
         return result or {}
 
 
-def merged_anyway(pr: PullRequest, error: GitHubApiError, tested_sha: str, sleep: Callable[[float], None]) -> str:
+def merged_anyway(
+    pr: PullRequest, error: GitHubApiError, tested_sha: str, base_ref: str, sleep: Callable[[float], None]
+) -> str:
     """The merge commit when a merge call that failed with a 5xx or no answer landed the tested head anyway, else "".
 
     GitHub can merge and then answer 502; a 4xx (conflict, protection, moved head) never merged.
+    During an incident the PR record can lag the branch for many minutes, so a merge commit on the
+    base whose second parent is the tested head counts too.
     """
     if error.status is not None and error.status < 500:
         return ""
@@ -95,6 +105,14 @@ def merged_anyway(pr: PullRequest, error: GitHubApiError, tested_sha: str, sleep
             if (pull.get("head") or {}).get("sha") != tested_sha:
                 return ""
             return pull.get("merge_commit_sha") or "unknown"
+        try:
+            commits = pr.recent_commits(base_ref) if base_ref else []
+        except GitHubApiError:
+            continue
+        for commit in commits:
+            parents = [parent.get("sha") for parent in commit.get("parents") or []]
+            if len(parents) == 2 and parents[1] == tested_sha:
+                return commit.get("sha") or "unknown"
     return ""
 
 
@@ -137,7 +155,7 @@ def merge(
     try:
         merged_sha = pr.merge(tested_sha, method).get("sha", "")
     except GitHubApiError as error:
-        merged_sha = merged_anyway(pr, error, tested_sha, sleep)
+        merged_sha = merged_anyway(pr, error, tested_sha, base_ref, sleep)
         if not merged_sha:
             return withdraw_failed_merge(pr, error, tested_sha=tested_sha, run_url=run_url)
         late = f" (GitHub answered {error.status or 'nothing'} after the merge)"
