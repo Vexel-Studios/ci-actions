@@ -90,10 +90,17 @@ class ConformanceTest(unittest.TestCase):
         path.write_text(path.read_text().replace("Vexel-Studios/ci-actions/", "Vexel-Studios/ci-runners/.github/actions/"))
         self.assertEqual(self.findings(), [])
 
+    def test_the_previous_vite_plus_is_a_warning_while_consumers_move(self):
+        self.write("package.json", json.dumps(package(devDependencies={**package()["devDependencies"], "vite-plus": TOOLS.vite_plus_previous})))
+        upgrade = [f for f in check_repository(LocalFiles(self.root))[1] if f.rule == "toolchain.upgrade"]
+        self.assertEqual([(f.warning, TOOLS.vite_plus in f.message) for f in upgrade], [(True, True)])
+        self.assertEqual(self.rules(), set())
+
     def test_tool_versions_must_be_exact_pins_of_the_standard(self):
         cases = {
             "toolchain.bun": package(packageManager="bun@1.4.4"),
-            "toolchain.vite-plus": package(devDependencies={**package()["devDependencies"], "vite-plus": "^1.7.0"}),
+            "toolchain.vite-plus": package(devDependencies={**package()["devDependencies"], "vite-plus": "1.6.0"}),
+            "toolchain.vite-plus (range)": package(devDependencies={**package()["devDependencies"], "vite-plus": f"^{TOOLS.vite_plus_previous}"}),
             "toolchain.code-style": package(devDependencies={**package()["devDependencies"], "@vexel-studios/code-style": "github:Vexel-Studios/code-style#v1.0.3"}),
             "toolchain.turbo": package(catalog={"turbo": "2.11.7"}),
             "toolchain.task-runner": package(scripts={"test": "vp run -r test"}),
@@ -101,7 +108,7 @@ class ConformanceTest(unittest.TestCase):
         for rule, value in cases.items():
             with self.subTest(rule):
                 self.write("package.json", json.dumps(value))
-                self.assertEqual(self.rules(), {rule})
+                self.assertEqual(self.rules(), {rule.split()[0]})
 
     def test_runner_rules(self):
         scenarios = {
