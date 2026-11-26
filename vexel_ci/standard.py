@@ -19,11 +19,16 @@ class Toolchain:
     vite_plus: str
     code_style: str
     turbo: str
+    # The vite-plus version before `vite_plus`, still accepted with a `toolchain.upgrade` warning while
+    # consumers move; empty once every consumer has.
+    vite_plus_previous: str = ""
 
 
 STANDARDS = {
-    # 23 November 2026.
-    "1": Toolchain(bun="1.4.5", node_major="24", vite_plus="1.7.0", code_style="1.0.4", turbo="2.11.10"),
+    # 23 November 2026; vite-plus 1.8.0 (tsrs 7.1.0-beta.tsrs4) since 26 November 2026 (Levi's approval, relayed by the lead).
+    "1": Toolchain(
+        bun="1.4.5", node_major="24", vite_plus="1.8.0", code_style="1.0.4", turbo="2.11.10", vite_plus_previous="1.7.0"
+    ),
 }
 LATEST = "1"
 

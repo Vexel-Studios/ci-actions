@@ -44,6 +44,7 @@ RULES = {
     "manifest": "The repository describes itself in .github/vexel-ci.json",
     "toolchain.bun": "Bun at the standard's version (packageManager)",
     "toolchain.vite-plus": "vite-plus at the standard's version",
+    "toolchain.upgrade": "A tool still at the version before the standard's, accepted while consumers move",
     "toolchain.code-style": "@vexel-studios/code-style at the standard's version",
     "toolchain.turbo": "Turbo at the standard's version, with a turbo.json",
     "toolchain.task-runner": "Turbo runs the tasks: no `vp run` in root scripts or workflows",
@@ -71,10 +72,11 @@ RULES = {
     "cost.closing-job": "Merge and blocked run in the closing job, or in a job that exists only in merge runs",
 }
 # Rules reported as warnings: they show in the report and as annotations but fail no strict run, so a
-# repository can move at its own pace (flow.route-key: until each repository has its route App).
-WARNING_RULES = frozenset({"flow.route-key"})
+# repository can move at its own pace (flow.route-key: until each repository has its route App;
+# toolchain.upgrade: until each repository is on the standard's new tool version).
+WARNING_RULES = frozenset({"flow.route-key", "toolchain.upgrade"})
 TYPESCRIPT_ONLY = {
-    "toolchain.bun", "toolchain.vite-plus", "toolchain.code-style", "toolchain.turbo", "toolchain.task-runner",
+    "toolchain.bun", "toolchain.vite-plus", "toolchain.upgrade", "toolchain.code-style", "toolchain.turbo", "toolchain.task-runner",
     "toolchain.vite-config",
     "flow.scope", "flow.router-permissions", "flow.setup", "flow.turbo-cache", "flow.cache-recheck", "flow.light-tests",
     "flow.light-tests-scope", "flow.tests-job",
@@ -218,7 +220,9 @@ def version_of(spec: str) -> str:
     return spec[1:] if spec.startswith("v") else spec
 
 
-def check_version(findings: list[Finding], rule: str, package: dict[str, Any], name: str, expected: str) -> None:
+def check_version(
+    findings: list[Finding], rule: str, package: dict[str, Any], name: str, expected: str, previous: str = ""
+) -> None:
     spec = declared_version(package, name)
     if spec is None:
         findings.append(Finding(rule, f"`{name}` is not in the root package.json (the standard pins {expected})"))
@@ -226,6 +230,10 @@ def check_version(findings: list[Finding], rule: str, package: dict[str, Any], n
     version = version_of(spec)
     if not EXACT_VERSION.match(version):
         findings.append(Finding(rule, f"`{name}` is `{spec}`, not an exact pin (the standard pins {expected})"))
+    elif version == previous:
+        findings.append(Finding(
+            "toolchain.upgrade", f"`{name}` is {version}; the standard moved to {expected}, and {version} is accepted until every repository has moved"
+        ))
     elif version != expected:
         findings.append(Finding(rule, f"`{name}` is {version}; the standard pins {expected}"))
 
@@ -243,7 +251,7 @@ def check_toolchain(files: Files, toolchain: Any, workflows: dict[str, str], fin
     manager = str(package.get("packageManager") or "").split("+", 1)[0]
     if manager != f"bun@{toolchain.bun}":
         findings.append(Finding("toolchain.bun", f"packageManager is `{manager or 'unset'}`; the standard is bun@{toolchain.bun}"))
-    check_version(findings, "toolchain.vite-plus", package, "vite-plus", toolchain.vite_plus)
+    check_version(findings, "toolchain.vite-plus", package, "vite-plus", toolchain.vite_plus, toolchain.vite_plus_previous)
     check_version(findings, "toolchain.code-style", package, "@vexel-studios/code-style", toolchain.code_style)
     check_version(findings, "toolchain.turbo", package, "turbo", toolchain.turbo)
     if files.read("turbo.json") is None:
